@@ -122,14 +122,16 @@ KNOWN_FREEPORTS = {
 # Application type:     Authentication Only (PKCE)
 # Callback URL:         http://127.0.0.1:8182/callback
 #
+
 # Required scopes:
 #   esi-universe.read_structures.v1     resolve structure names/details
 #   esi-search.search_structures.v1     search structures by system name
 #   esi-markets.structure_markets.v1    fetch structure market orders
 #   esi-ui.open_window.v1               open in-game windows
 #   publicData                          public character info
-#   esi-corporations.read_structures.v1 corp-visible structures
-#   esi-structures.read_character.v1    character-visible structures
+#   esi-markets.read_character_orders.v1    for marking character orders, not yet implemented
+#   esi-markets.read_corporation_orders.v1  for marking corporate orders, not yet implemented
+
 
 SSO_AUTH_URL  = "https://login.eveonline.com/v2/oauth/authorize"
 SSO_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
@@ -141,12 +143,6 @@ SSO_SCOPES    = " ".join([
     "esi-search.search_structures.v1",
     "esi-markets.structure_markets.v1",
     "esi-ui.open_window.v1",
-    "esi-corporations.read_structures.v1",
-    "esi-markets.read_character_orders.v1",
-    "esi-markets.read_corporation_orders.v1",
-    "esi-alliances.read_contacts.v1",
-    "esi-structures.read_corporation.v1",
-    "esi-structures.read_character.v1",
 ])
 
 # ---------------------------------------------------------------------------
