@@ -1,3 +1,7 @@
+# EVE Caravanserai
+caravanserai.db
+private.pem
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
