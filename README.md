@@ -1,7 +1,7 @@
 # EVE Caravanserai
 
 ![EVE Caravanserai](https://github.com/user-attachments/assets/23f0f9e6-8340-4bc4-bbfb-c82d1aff1701)
-_(don't worry, it was a test key_
+_(don't worry, it was a test key)_
 
 A market comparison tool for EVE Online. Compare prices and supply between any two markets — NPC trade hubs, freeport player structures, or any structure your character can access — to find import and export opportunities.
 
