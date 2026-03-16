@@ -208,3 +208,8 @@ It could be a port issue. Make sure you don't have any other apps using port 818
 ## Privacy
 
 Everything runs locally. Your Client ID, character tokens, and all market data are stored only in `caravanserai.db` on your own computer. Nothing is sent anywhere except CCP's official ESI API (`esi.evetech.net`) and your calls to the Fuzzworks market data service (`market.fuzzwork.co.uk`).
+
+## Upcoming Features
+
+- When the user wants to select new structures/stations as source and destination, we now use a page refresh. This could be made user-friendly by adding a deselect button of sorts.
+- We want a filter for meta levels ('show only T1' or 'show T1 up to deadspace' or 'no deadspace and officer')
