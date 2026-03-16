@@ -100,12 +100,8 @@ EVE Caravanserai needs permission to read market data from your EVE character. Y
      - `esi-search.search_structures.v1`
      - `esi-markets.structure_markets.v1`
      - `esi-ui.open_window.v1`
-     - `esi-corporations.read_structures.v1`
      - `esi-markets.read_character_orders.v1`
      - `esi-markets.read_corporation_orders.v1`
-     - `esi-alliances.read_contacts.v1`
-     - `esi-structures.read_corporation.v1`
-     - `esi-structures.read_character.v1`
 4. Click **Create Application**
 5. On the next page, copy your **Client ID** — a long string of letters and numbers. Keep it handy for Step 5.
 
@@ -213,6 +209,7 @@ Everything runs locally. Your Client ID, character tokens, and all market data a
 
 ## Upcoming Features
 
+- Mark player and corporation orders in a different color
 - When the user wants to select new structures/stations as source and destination, we now use a page refresh. This could be made user-friendly by adding a deselect button of sorts.
 - We want a filter for meta levels ('show only T1' or 'show T1 up to deadspace' or 'no deadspace and officer')
 - Easier pagination / page navigation in results.
@@ -221,4 +218,5 @@ Everything runs locally. Your Client ID, character tokens, and all market data a
 
 # Known Issues
 
+- Client id field needs to be a password field, to hide it
 - Remnant/exotic skin items not classified under the normal skin item group still appearing
