@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Support EVE Caravanserai</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #050a0f;
+    --bg2:     #0a1520;
+    --border:  #1a3a5c;
+    --accent:  #00c8ff;
+    --accent3: #00ff9d;
+    --text:    #c8e0f0;
+    --dim:     #4a7a9b;
+    --mono:    'Share Tech Mono', monospace;
+    --sans:    'Rajdhani', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,200,255,0.012) 2px, rgba(0,200,255,0.012) 4px
+    );
+    pointer-events: none;
+  }
+  .card {
+    max-width: 460px;
+    width: 100%;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 40px 36px;
+    text-align: center;
+    position: relative;
+  }
+  .card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent3), transparent);
+  }
+  .logo {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    opacity: 0.7;
+  }
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    margin-bottom: 32px;
+    line-height: 1.6;
+  }
+  .step {
+    background: rgba(0,200,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    text-align: left;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .step-num {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--accent);
+    min-width: 24px;
+    line-height: 1.4;
+  }
+  .step-body { flex: 1; }
+  .step-title {
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .step-desc {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    line-height: 1.6;
+  }
+  .corp-name {
+    color: var(--accent3);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    display: block;
+    margin: 6px 0 4px;
+  }
+  .corp-id {
+    color: var(--dim);
+    font-size: 10px;
+  }
+  .note {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 24px;
+    line-height: 1.7;
+    opacity: 0.7;
+  }
+  .close-btn {
+    display: inline-block;
+    margin-top: 24px;
+    padding: 8px 20px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    background: rgba(0,200,255,0.06);
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+  .close-btn:hover {
+    background: rgba(0,200,255,0.18);
+    box-shadow: 0 0 14px rgba(0,200,255,0.3);
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">⬡ EVE Caravanserai</div>
+  <h1>Support This Tool</h1>
+  <p class="subtitle">
+    This tool is free to use.<br>
+    If it's saving you time and ISK, consider sending a contribution.
+  </p>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <div class="step-title">Open your EVE wallet in-game</div>
+      <div class="step-desc">Press <strong>Alt+W</strong> or go to<br>Neocom → Wallet</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <div class="step-title">Send ISK to our corporation</div>
+      <div class="step-desc">
+        In the wallet, click <strong>Give Money</strong> and search for:
+        <span class="corp-name">EYES 3VERYWHERE</span>
+        <span class="corp-id">Corporation ID: 98496278</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <div class="step-title">Any amount is appreciated</div>
+      <div class="step-desc">
+        There's no minimum. Every contribution helps keep the tool updated and running.
+      </div>
+    </div>
+  </div>
+
+  <p class="note">
+    You can also find us in-game by searching <strong>EYES 3VERYWHERE</strong><br>
+    in the corporation search and opening our information window.
+  </p>
+
+  <a href="javascript:window.close()" class="close-btn">Close Window</a>
+</div>
+</body>
+</html>

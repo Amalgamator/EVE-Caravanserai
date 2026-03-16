@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVE Caravanserai</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/caravanserai.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">&#9670; EVE Caravanserai</div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button onclick="openDonationPage()"
+      style="background:linear-gradient(135deg,rgba(0,200,255,0.15),rgba(0,255,157,0.1));border:1px solid var(--accent3);color:var(--accent3);font-family:var(--mono);font-size:10px;letter-spacing:1.5px;padding:6px 14px;cursor:pointer;border-radius:2px;transition:all 0.2s;text-transform:uppercase"
+      onmouseover="this.style.boxShadow='0 0 18px rgba(0,255,157,0.4)'"
+      onmouseout="this.style.boxShadow='none'"
+      title="Support development — send ISK to EYES 3VERYWHERE">
+      ⬡ Support This Tool
+    </button>
+    <div class="header-status" id="headerDate">—</div>
+  </div>
+</header>
+
+<div class="container">
+  <!-- LEFT SIDEBAR -->
+  <aside>
+
+    <!-- Auth Panel -->
+    <div class="panel">
+      <div class="panel-header"><span class="icon">⬡</span> EVE Character</div>
+      <div class="panel-body">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-size:12px;margin-bottom:4px">Required for structure markets</div>
+            <div id="authBadge" class="status-badge loading">CHECKING…</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <button id="btnLogin"  class="btn"        onclick="_triggerLogin()"  style="display:none">⬡ LOGIN</button>
+            <button id="btnLogout" class="btn danger" onclick="_triggerLogout()" style="display:none">LOGOUT</button>
+          </div>
+        </div>
+        <div id="authCharName" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- Client ID Panel -->
+    <div class="panel">
+      <div class="panel-header"><span class="icon">⌗</span> ESI Client ID</div>
+      <div class="panel-body">
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:10px;line-height:1.7">
+          Register at <span style="color:var(--accent)">developers.eveonline.com</span><br>
+          Type: <span style="color:var(--accent3)">Authentication Only (PKCE)</span><br>
+          Callback: <span style="color:var(--accent)">http://127.0.0.1:8182/callback</span><br>
+          Scopes: <span style="color:var(--text)">publicData · esi-universe.read_structures.v1 · esi-search.search_structures.v1 · esi-markets.structure_markets.v1 · esi-ui.open_window.v1</span>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <input id="clientIdInput" class="filter-input" type="text" placeholder="Paste client ID…" style="width:100%;font-size:11px;padding:6px 8px">
+          <button class="btn" onclick="_saveClientId()" style="padding:6px 10px;font-size:10px">SAVE</button>
+        </div>
+        <div id="clientIdStatus" style="font-family:var(--mono);font-size:10px;color:var(--text-dim)"></div>
+      </div>
+    </div>
+
+    <!-- SDE Status -->
+    <div class="panel">
+      <div class="panel-header"><span class="icon">◉</span> Universe</div>
+      <div class="panel-body">
+        <div id="sdeStatus" style="font-family:var(--mono);font-size:11px;color:var(--text-dim)">
+          <span class="spinner"></span> Loading universe data…
+        </div>
+      </div>
+    </div>
+
+    <!-- Config Panel -->
+    <div class="panel" id="configPanel" style="opacity:0.4;pointer-events:none">
+      <div class="panel-header"><span class="icon">⚙</span> Snapshot Options</div>
+      <div class="panel-body">
+        <label style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--text-dim);cursor:pointer">
+          <input type="checkbox" id="excludeSkins" checked
+                 style="accent-color:var(--accent);width:14px;height:14px"
+                 onchange="localStorage.setItem('excludeSkins', this.checked ? '1' : '0')">
+          Exclude apparel &amp; SKIN licenses
+        </label>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:6px;opacity:0.7">
+          Applied when fetching market data. Re-fetch to change.
+        </div>
+      </div>
+    </div>
+
+    <!-- Source + Destination (locked until auth + client ID ready) -->
+    <div id="marketPanels" style="opacity:0.4;pointer-events:none">
+
+    <!-- Source Panel -->
+    <div class="panel">
+      <div class="panel-header"><span class="icon">▶</span> Source Market</div>
+      <div class="panel-body">
+        <div id="srcSelected" style="display:none" class="selected-loc">
+          <div class="name" id="srcName">—</div>
+          <div class="meta" id="srcMeta">—</div>
+          <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+            <div id="srcSnapBadge" class="status-badge missing">NO DATA</div>
+            <button id="btnFetchSrc" class="btn" onclick="fetchSnapshot('src')" style="padding:4px 10px;font-size:10px">FETCH</button>
+            <span class="spinner" id="srcSpinner" style="display:none"></span>
+          </div>
+        </div>
+        <div id="srcPicker">
+          <div class="market-tabs">
+            <div class="market-tab active" onclick="switchTab('src','npc',this)">NPC Hubs</div>
+            <div class="market-tab" onclick="switchTab('src','freeport',this)">Freeports</div>
+            <div class="market-tab" onclick="switchTab('src','structure',this)">Exclusive Outposts</div>
+          </div>
+          <div id="src-tab-npc"       class="tab-pane active"></div>
+          <div id="src-tab-freeport"  class="tab-pane"></div>
+          <div id="src-tab-structure" class="tab-pane">
+            <div id="srcSdeGate" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:8px 0">
+              <span class="spinner"></span> Waiting for universe data…
+            </div>
+            <div id="srcStructureSearch" style="display:none">
+              <div class="search-wrap">
+                <span class="search-icon">⌕</span>
+                <input class="search-input" id="srcSystemSearch" type="text"
+                       placeholder="Search system…" autocomplete="off"
+                       oninput="onSystemSearch('src', this.value)">
+                <div class="dropdown" id="srcSystemDropdown" style="display:none"></div>
+              </div>
+              <div id="srcSystemInfo" style="font-family:var(--mono);font-size:10px;color:var(--text-dim);margin-bottom:8px"></div>
+              <div id="srcStructureList"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Swap -->
+    <div class="swap-btn">
+      <button onclick="swapMarkets()" title="Swap source and destination">⇄</button>
+    </div>
+
+    <!-- Destination Panel -->
+    <div class="panel">
+      <div class="panel-header"><span class="icon">◀</span> Destination Market</div>
+      <div class="panel-body">
+        <div id="dstSelected" style="display:none" class="selected-loc" style="border-color:var(--accent3)">
+          <div class="name" id="dstName">—</div>
+          <div class="meta" id="dstMeta">—</div>
+          <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+            <div id="dstSnapBadge" class="status-badge missing">NO DATA</div>
+            <button id="btnFetchDst" class="btn" onclick="fetchSnapshot('dst')" style="padding:4px 10px;font-size:10px">FETCH</button>
+            <span class="spinner" id="dstSpinner" style="display:none"></span>
+          </div>
+        </div>
+        <div id="dstPicker">
+          <div class="market-tabs">
+            <div class="market-tab active" onclick="switchTab('dst','npc',this)">NPC Hubs</div>
+            <div class="market-tab" onclick="switchTab('dst','freeport',this)">Freeports</div>
+            <div class="market-tab" onclick="switchTab('dst','structure',this)">Exclusive Outposts</div>
+          </div>
+          <div id="dst-tab-npc"       class="tab-pane active"></div>
+          <div id="dst-tab-freeport"  class="tab-pane"></div>
+          <div id="dst-tab-structure" class="tab-pane">
+            <div id="dstSdeGate" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:8px 0">
+              <span class="spinner"></span> Waiting for universe data…
+            </div>
+            <div id="dstStructureSearch" style="display:none">
+              <div class="search-wrap">
+                <span class="search-icon">⌕</span>
+                <input class="search-input" id="dstSystemSearch" type="text"
+                       placeholder="Search system…" autocomplete="off"
+                       oninput="onSystemSearch('dst', this.value)">
+                <div class="dropdown" id="dstSystemDropdown" style="display:none"></div>
+              </div>
+              <div id="dstSystemInfo" style="font-family:var(--mono);font-size:10px;color:var(--text-dim);margin-bottom:8px"></div>
+              <div id="dstStructureList"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Compare button -->
+    <button id="btnCompare" class="btn full" onclick="loadComparison()"
+            style="margin-bottom:16px" disabled>
+      ◈ COMPARE MARKETS
+    </button>
+
+    </div><!-- /marketPanels -->
+
+  </aside>
+
+  <!-- MAIN AREA -->
+  <div class="main-panel">
+    <div class="panel">
+      <div class="panel-header"><span class="icon">⊞</span> Market Comparison</div>
+      <div class="panel-body" style="padding-bottom:8px">
+        <div class="toolbar">
+          <span class="toolbar-label">FILTER:</span>
+          <input class="filter-input" id="filterInput" type="text"
+                 placeholder="Item name…" oninput="applyFilter()">
+
+          <span class="toolbar-label">DATE:</span>
+          <select class="select-input" id="dateSelect" onchange="loadComparison()">
+            <option value="">Today</option>
+          </select>
+
+          <span class="toolbar-label">SHOW:</span>
+          <select class="select-input" id="showMode" onchange="applyFilter()">
+            <option value="all">All items</option>
+            <option value="src_only">Source only</option>
+            <option value="both">In both markets</option>
+            <option value="dst_only">Destination only</option>
+          </select>
+
+          <span class="toolbar-label">CATEGORY:</span>
+          <select class="select-input" id="filterCategory" onchange="applyFilter()" style="max-width:160px">
+            <option value="">All</option>
+          </select>
+
+          <span class="toolbar-label">GROUP:</span>
+          <select class="select-input" id="filterGroup" onchange="applyFilter()" style="max-width:160px">
+            <option value="">All</option>
+          </select>
+
+          <span style="margin-left:auto" id="rowCount" class="toolbar-label"></span>
+          <button class="btn" id="btnExportCsv" onclick="exportCsv()" disabled
+                  style="padding:6px 12px;font-size:10px">⬇ CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-body" style="padding:0">
+        <div class="table-wrap">
+          <table id="compTable">
+            <thead>
+              <tr id="tableHead">
+                <th onclick="sortBy('type_name')"     data-col="type_name">Item</th>
+                <th onclick="sortBy('category_name')" data-col="category_name">Category</th>
+                <th onclick="sortBy('group_name')"    data-col="group_name">Group</th>
+                <th onclick="sortBy('src_supply')" data-col="src_supply" class="src-col">Src Supply</th>
+                <th onclick="sortBy('src_demand')" data-col="src_demand" class="src-col">Src Demand</th>
+                <th onclick="sortBy('src_split')"  data-col="src_split"  class="src-col">Src Split</th>
+                <th onclick="sortBy('dst_supply')" data-col="dst_supply" class="dst-col">Dst Supply</th>
+                <th onclick="sortBy('dst_demand')" data-col="dst_demand" class="dst-col">Dst Demand</th>
+                <th onclick="sortBy('dst_split')"  data-col="dst_split"  class="dst-col">Dst Split</th>
+                <th onclick="sortBy('src_spread')" data-col="src_spread" title="Src bid/ask spread — (sell - buy) / sell">Src Spread %</th>
+                <th onclick="sortBy('dst_spread')" data-col="dst_spread" title="Dst bid/ask spread — (sell - buy) / sell">Dst Spread %</th>
+                <th onclick="sortBy('import_margin')" data-col="import_margin" title="Dst sell ÷ Src buy — buy at source, sell at destination">Import %</th>
+                <th onclick="sortBy('export_margin')" data-col="export_margin" title="Src sell ÷ Dst buy — buy at destination, sell at source">Export %</th>
+                <th style="cursor:default">In-Game</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              <tr>
+                <td colspan="14">
+                  <div class="empty-state">
+                    <div class="big">◈</div>
+                    Select source &amp; destination markets, then click COMPARE
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager" id="pager" style="padding:8px 16px">
+          <span id="pagerInfo"></span>
+          <button onclick="changePage(-1)" id="btnPrev" disabled>◀ PREV</button>
+          <button onclick="changePage(1)"  id="btnNext" disabled>NEXT ▶</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/js/caravanserai.js"></script>
+</body>
+</html>
