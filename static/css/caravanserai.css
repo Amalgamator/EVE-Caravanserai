@@ -135,3 +135,7 @@
   .sec-07 { color:#62d9a8 }  .sec-06 { color:#71e452 }  .sec-05 { color:#ecff81 }
   .sec-04 { color:#df6e07 }  .sec-03 { color:#d0400b }  .sec-02 { color:#bb0f19 }
   .sec-01 { color:#751f18 }  .sec-00 { color:#8e3161 }
+/* Hide number input spinners in pager */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }

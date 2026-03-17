@@ -57,7 +57,7 @@
           Scopes: <span style="color:var(--text)">publicData · esi-universe.read_structures.v1 · esi-search.search_structures.v1 · esi-markets.structure_markets.v1 · esi-ui.open_window.v1</span>
         </div>
         <div style="display:flex;gap:6px;margin-bottom:8px">
-          <input id="clientIdInput" class="filter-input" type="text" placeholder="Paste client ID…" style="width:100%;font-size:11px;padding:6px 8px">
+          <input id="clientIdInput" class="filter-input" type="password" placeholder="Paste client ID…" style="width:100%;font-size:11px;padding:6px 8px" autocomplete="off">
           <button class="btn" onclick="_saveClientId()" style="padding:6px 10px;font-size:10px">SAVE</button>
         </div>
         <div id="clientIdStatus" style="font-family:var(--mono);font-size:10px;color:var(--text-dim)"></div>
@@ -223,6 +223,19 @@
             <option value="">All</option>
           </select>
 
+          <span class="toolbar-label">META:</span>
+          <select class="select-input" id="filterMeta" onchange="applyFilter()" style="max-width:180px">
+            <option value="">All</option>
+            <option value="t1">Tech I only</option>
+            <option value="meta">Meta (1–4)</option>
+            <option value="t2">Tech II</option>
+            <option value="faction">Faction &amp; Storyline</option>
+            <option value="deadspace">Deadspace</option>
+            <option value="officer">Officer</option>
+            <option value="no_dead_off">No Deadspace/Officer</option>
+            <option value="t1_and_t2">T1 + T2 only</option>
+          </select>
+
           <span style="margin-left:auto" id="rowCount" class="toolbar-label"></span>
           <button class="btn" id="btnExportCsv" onclick="exportCsv()" disabled
                   style="padding:6px 12px;font-size:10px">⬇ CSV</button>
@@ -232,6 +245,11 @@
 
     <div class="panel">
       <div class="panel-body" style="padding:0">
+        <div class="pager" id="pagerTop" style="padding:8px 16px">
+          <span id="pagerInfoTop"></span>
+          <button onclick="changePage(-1)" id="btnPrevTop" disabled>◀ PREV</button>
+          <button onclick="changePage(1)"  id="btnNextTop" disabled>NEXT ▶</button>
+        </div>
         <div class="table-wrap">
           <table id="compTable">
             <thead>
@@ -245,6 +263,10 @@
                 <th onclick="sortBy('dst_supply')" data-col="dst_supply" class="dst-col">Dst Supply</th>
                 <th onclick="sortBy('dst_demand')" data-col="dst_demand" class="dst-col">Dst Demand</th>
                 <th onclick="sortBy('dst_split')"  data-col="dst_split"  class="dst-col">Dst Split</th>
+                <th onclick="sortBy('char_sell')" data-col="char_sell" title="Your sell orders (all characters)" style="color:#00ff9d">Chr Sell</th>
+                <th onclick="sortBy('char_buy')"  data-col="char_buy"  title="Your buy orders (all characters)"  style="color:#ff7b00">Chr Buy</th>
+                <th onclick="sortBy('corp_sell')" data-col="corp_sell" title="Corp sell orders" style="color:#00ff9d">Corp Sell</th>
+                <th onclick="sortBy('corp_buy')"  data-col="corp_buy"  title="Corp buy orders"  style="color:#ff7b00">Corp Buy</th>
                 <th onclick="sortBy('src_spread')" data-col="src_spread" title="Src bid/ask spread — (sell - buy) / sell">Src Spread %</th>
                 <th onclick="sortBy('dst_spread')" data-col="dst_spread" title="Dst bid/ask spread — (sell - buy) / sell">Dst Spread %</th>
                 <th onclick="sortBy('import_margin')" data-col="import_margin" title="Dst sell ÷ Src buy — buy at source, sell at destination">Import %</th>
@@ -254,7 +276,7 @@
             </thead>
             <tbody id="tableBody">
               <tr>
-                <td colspan="14">
+                <td colspan="18">
                   <div class="empty-state">
                     <div class="big">◈</div>
                     Select source &amp; destination markets, then click COMPARE

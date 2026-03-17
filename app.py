@@ -59,8 +59,16 @@ FUZZWORKS_CSV_URL = "https://market.fuzzwork.co.uk/aggregatecsv.csv.gz"
 
 APPAREL_CATEGORY_ID = 30  # invCategories: Apparel
 
-# Upwell structures that provide a market service
-MARKET_STRUCTURE_TYPES = {35825, 35826, 35827, 35832, 35833, 35834, 35835, 35836}
+# Upwell structures that can fit a Market Services Module, with display names
+# Type IDs verified against EVE Ref (everef.net)
+MARKET_STRUCTURE_TYPES = {
+    35832: "Astrahus",
+    35833: "Fortizar",
+    35834: "Keepstar",
+    35826: "Azbel",
+    35827: "Sotiyo",
+    35836: "Tatara",
+}
 
 # ---------------------------------------------------------------------------
 # NPC trade hubs
@@ -122,16 +130,14 @@ KNOWN_FREEPORTS = {
 # Application type:     Authentication Only (PKCE)
 # Callback URL:         http://127.0.0.1:8182/callback
 #
-
 # Required scopes:
 #   esi-universe.read_structures.v1     resolve structure names/details
 #   esi-search.search_structures.v1     search structures by system name
 #   esi-markets.structure_markets.v1    fetch structure market orders
 #   esi-ui.open_window.v1               open in-game windows
 #   publicData                          public character info
-#   esi-markets.read_character_orders.v1    for marking character orders, not yet implemented
-#   esi-markets.read_corporation_orders.v1  for marking corporate orders, not yet implemented
-
+#   esi-corporations.read_structures.v1 corp-visible structures
+#   esi-structures.read_character.v1    character-visible structures
 
 SSO_AUTH_URL  = "https://login.eveonline.com/v2/oauth/authorize"
 SSO_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
@@ -143,6 +149,8 @@ SSO_SCOPES    = " ".join([
     "esi-search.search_structures.v1",
     "esi-markets.structure_markets.v1",
     "esi-ui.open_window.v1",
+    "esi-markets.read_character_orders.v1",   # character buy/sell order quantities
+    "esi-markets.read_corporation_orders.v1", # corporation buy/sell order quantities
 ])
 
 # ---------------------------------------------------------------------------
@@ -184,11 +192,12 @@ def init_db() -> None:
         );
 
         CREATE TABLE IF NOT EXISTS type_groups (
-            type_id     INTEGER PRIMARY KEY,
-            group_id    INTEGER NOT NULL,
-            group_name  TEXT,
-            category_id INTEGER NOT NULL,
-            category_name TEXT
+            type_id       INTEGER PRIMARY KEY,
+            group_id      INTEGER NOT NULL,
+            group_name    TEXT,
+            category_id   INTEGER NOT NULL,
+            category_name TEXT,
+            meta_level    INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS structure_names (
@@ -220,6 +229,15 @@ def init_db() -> None:
         );
 
         CREATE INDEX IF NOT EXISTS idx_map_systems_name ON map_systems(name);
+
+        CREATE TABLE IF NOT EXISTS characters (
+            character_id   INTEGER PRIMARY KEY,
+            character_name TEXT    NOT NULL,
+            access_token   TEXT,
+            refresh_token  TEXT,
+            expires_at     REAL,
+            is_primary     INTEGER DEFAULT 0
+        );
 
         CREATE TABLE IF NOT EXISTS kv (
             namespace TEXT NOT NULL,
@@ -336,8 +354,16 @@ def resolve_type_names(type_ids: list) -> None:
 # Apparel / SKIN filters
 # ---------------------------------------------------------------------------
 
+# SKIN name patterns — covers standard, plural, multi-ship, and special editions
+_SKIN_SUFFIXES = (" SKIN", " SKINs", " Skin", "License")
+_SKIN_SUBSTRINGS = ("SKIN License", "Day SKIN", "SKIN Collection")
+
 def _is_skin_name(name: str) -> bool:
-    return name.endswith(" SKIN") or name.endswith(" SKINs")
+    if any(name.endswith(s) for s in _SKIN_SUFFIXES):
+        return True
+    if any(s in name for s in _SKIN_SUBSTRINGS):
+        return True
+    return False
 
 
 _apparel_ids: set         = set()
@@ -609,6 +635,7 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
             tn.name                          AS type_name,
             tg.group_name                    AS group_name,
             tg.category_name                 AS category_name,
+            tg.meta_level                    AS meta_level,
             s.sell_units                     AS src_supply,
             s.buy_units                      AS src_demand,
             s.split_price                    AS src_split,
@@ -638,6 +665,7 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
             tn.name,
             tg.group_name,
             tg.category_name,
+            tg.meta_level,
             s.sell_units, s.buy_units, s.split_price,
             s.lowest_sell_10pct, s.highest_buy_10pct,
             d.sell_units, d.buy_units, d.split_price,
@@ -669,6 +697,7 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
             "type_name":     row["type_name"] or f"Type {row['type_id']}",
             "group_name":    row["group_name"] or "",
             "category_name": row["category_name"] or "",
+            "meta_level":    row["meta_level"] if row["meta_level"] is not None else 0,
             "src_supply": src_supply,
             "src_demand": src_demand,
             "src_split":  row["src_split"],
@@ -768,15 +797,19 @@ def _ensure_universe_cache() -> None:
                 gid = int(r["groupID"])
                 gi  = group_info.get(gid)
                 if gi is not None:
+                    # metaGroupID: 1=T1, 2=T2, 3=Storyline, 4=Faction, 5=Officer,
+                    #              6=Deadspace, 14=T3  — store raw for frontend filtering
+                    meta = int(r["metaGroupID"]) if r.get("metaGroupID") else 0
                     rows.append((
                         tid, gid,
                         gi["group_name"],
                         gi["category_id"],
                         cat_names.get(gi["category_id"], ""),
+                        meta,
                     ))
             except (KeyError, ValueError):
                 pass
-        bulk_insert("type_groups", rows, 5)
+        bulk_insert("type_groups", rows, 6)
         log.info("[SDE] %d type→group→category mappings. Universe cache ready.", len(rows))
 
     except Exception as exc:
@@ -812,13 +845,73 @@ def search_systems(query: str) -> list:
 # SSO (PKCE)
 # ---------------------------------------------------------------------------
 
-def sso_get_token() -> Optional[str]:
-    tokens = kv_get("auth", "tokens")
-    if not tokens:
+def get_all_characters() -> list:
+    """Return all authenticated characters from DB."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT character_id, character_name, is_primary FROM characters ORDER BY is_primary DESC, character_name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_character_token(character_id: Optional[int] = None) -> Optional[str]:
+    """Return a valid access token for the given character (or primary if None)."""
+    conn = get_db()
+    if character_id:
+        row = conn.execute(
+            "SELECT * FROM characters WHERE character_id=?", (character_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM characters WHERE is_primary=1 LIMIT 1"
+        ).fetchone()
+        if not row:
+            row = conn.execute("SELECT * FROM characters LIMIT 1").fetchone()
+    conn.close()
+    if not row:
         return None
-    if time.time() > tokens.get("expires_at", 0) - 60:
-        return _sso_refresh(tokens)
+    tokens = dict(row)
+    if time.time() > (tokens.get("expires_at") or 0) - 60:
+        return _refresh_character_token(tokens)
     return tokens.get("access_token")
+
+
+def sso_get_token() -> Optional[str]:
+    """Return primary character token (backwards compat)."""
+    # Check legacy kv store first for smooth migration
+    tokens = kv_get("auth", "tokens")
+    if tokens and time.time() < tokens.get("expires_at", 0) - 60:
+        return tokens.get("access_token")
+    return get_character_token()
+
+
+def _refresh_character_token(tokens: dict) -> Optional[str]:
+    """Refresh a character token and persist it."""
+    client_id = kv_get("config", "esi_client_id")
+    if not client_id:
+        return None
+    try:
+        r = requests.post(SSO_TOKEN_URL, data={
+            "grant_type":    "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id":     client_id,
+        }, timeout=15)
+        if r.status_code == 200:
+            new_tok = r.json()
+            expires_at = time.time() + new_tok.get("expires_in", 1199)
+            conn = get_db()
+            conn.execute(
+                "UPDATE characters SET access_token=?, refresh_token=?, expires_at=? WHERE character_id=?",
+                (new_tok["access_token"], new_tok.get("refresh_token", tokens["refresh_token"]),
+                 expires_at, tokens["character_id"])
+            )
+            conn.commit(); conn.close()
+            return new_tok["access_token"]
+        log.warning("[SSO] Refresh failed for char %s: HTTP %s", tokens.get("character_id"), r.status_code)
+    except Exception as exc:
+        log.warning("[SSO] Refresh error: %s", exc)
+    return None
 
 
 def _sso_refresh(tokens: dict) -> Optional[str]:
@@ -862,16 +955,33 @@ def _complete_auth(code: str) -> None:
             return
         tokens               = r.json()
         tokens["expires_at"] = time.time() + tokens.get("expires_in", 1199)
-        kv_set("auth", "tokens", tokens)
         verify = requests.get(
             SSO_VERIFY,
             headers={"Authorization": f"Bearer {tokens['access_token']}"},
             timeout=15,
         ).json()
-        kv_set("auth", "character_id",   verify.get("CharacterID"))
-        kv_set("auth", "character_name", verify.get("CharacterName"))
-        log.info("[SSO] Authenticated as %s (%s)",
-                 verify.get("CharacterName"), verify.get("CharacterID"))
+        char_id   = verify.get("CharacterID")
+        char_name = verify.get("CharacterName")
+        # Store in characters table
+        conn = get_db()
+        existing = conn.execute("SELECT COUNT(*) as c FROM characters").fetchone()["c"]
+        conn.execute("""
+            INSERT INTO characters (character_id, character_name, access_token, refresh_token, expires_at, is_primary)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(character_id) DO UPDATE SET
+                character_name=excluded.character_name,
+                access_token=excluded.access_token,
+                refresh_token=excluded.refresh_token,
+                expires_at=excluded.expires_at
+        """, (char_id, char_name, tokens["access_token"],
+              tokens.get("refresh_token"), tokens["expires_at"],
+              1 if existing == 0 else 0))
+        conn.commit(); conn.close()
+        # Also keep legacy kv for backwards compat
+        kv_set("auth", "tokens",         tokens)
+        kv_set("auth", "character_id",   char_id)
+        kv_set("auth", "character_name", char_name)
+        log.info("[SSO] Authenticated as %s (%s)", char_name, char_id)
     except Exception as exc:
         log.error("[SSO] Auth error: %s", exc, exc_info=True)
 
@@ -960,9 +1070,40 @@ def oauth_callback():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
-    for key in ("tokens", "character_id", "character_name"):
-        kv_set("auth", key, None)
-    log.info("[SSO] Logged out.")
+    data    = request.get_json(force=True) or {}
+    char_id = data.get("character_id")
+    if char_id:
+        conn = get_db()
+        conn.execute("DELETE FROM characters WHERE character_id=?", (char_id,))
+        # If this was primary, promote next character
+        conn.execute("""
+            UPDATE characters SET is_primary=1
+            WHERE character_id=(SELECT character_id FROM characters LIMIT 1)
+              AND NOT EXISTS (SELECT 1 FROM characters WHERE is_primary=1)
+        """)
+        conn.commit(); conn.close()
+        log.info("[SSO] Removed character %s.", char_id)
+    else:
+        # Logout all
+        conn = get_db()
+        conn.execute("DELETE FROM characters")
+        conn.commit(); conn.close()
+        for key in ("tokens", "character_id", "character_name"):
+            kv_set("auth", key, None)
+        log.info("[SSO] All characters logged out.")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/set_primary", methods=["POST"])
+def auth_set_primary():
+    data    = request.get_json(force=True) or {}
+    char_id = data.get("character_id")
+    if not char_id:
+        return jsonify({"ok": False}), 400
+    conn = get_db()
+    conn.execute("UPDATE characters SET is_primary=0")
+    conn.execute("UPDATE characters SET is_primary=1 WHERE character_id=?", (char_id,))
+    conn.commit(); conn.close()
     return jsonify({"ok": True})
 
 
@@ -979,12 +1120,19 @@ def auth_save_client_id():
 
 @app.route("/api/auth/status")
 def api_auth_status():
+    characters = get_all_characters()
     return jsonify({
-        "authenticated":  sso_get_token() is not None,
-        "character_name": kv_get("auth", "character_name"),
-        "character_id":   kv_get("auth", "character_id"),
+        "authenticated":  len(characters) > 0,
+        "characters":     characters,
+        "character_name": characters[0]["character_name"] if characters else None,
+        "character_id":   characters[0]["character_id"]   if characters else None,
         "has_client_id":  bool(kv_get("config", "esi_client_id")),
     })
+
+
+@app.route("/api/auth/characters")
+def api_auth_characters():
+    return jsonify(get_all_characters())
 
 # ---------------------------------------------------------------------------
 # Routes — market locations
@@ -1085,10 +1233,15 @@ def api_structures_in_system(system_id):
 
     results = sorted(
         [
-            {"id": sid, "name": info["name"], "type_id": info.get("type_id")}
+            {
+                "id":        sid,
+                "name":      info["name"],
+                "type_id":   info.get("type_id"),
+                "type_name": MARKET_STRUCTURE_TYPES.get(info.get("type_id"), "Unknown"),
+            }
             for sid, info in cached_map.items()
             if info.get("solar_system_id") == system_id
-            and (not info.get("type_id") or info["type_id"] in MARKET_STRUCTURE_TYPES)
+            and info.get("type_id") in MARKET_STRUCTURE_TYPES
         ],
         key=lambda x: x["name"]
     )
@@ -1231,6 +1384,66 @@ def api_search_systems():
 # ---------------------------------------------------------------------------
 # Routes — in-game UI windows
 # ---------------------------------------------------------------------------
+
+@app.route("/api/orders/character")
+def api_character_orders():
+    """Return open orders for all authenticated characters, summed per type."""
+    result = {}
+    for char in get_all_characters():
+        token = get_character_token(char["character_id"])
+        if not token:
+            continue
+        orders, _ = esi_get_authed(
+            f"/characters/{char['character_id']}/orders/", token
+        )
+        for o in (orders or []):
+            if o.get("state", "open") != "open":
+                continue
+            tid = str(o["type_id"])
+            if tid not in result:
+                result[tid] = {"char_buy": 0, "char_sell": 0}
+            key = "char_buy" if o.get("is_buy_order", False) else "char_sell"
+            result[tid][key] += o.get("volume_remain", 0)
+    return jsonify(result)
+
+
+@app.route("/api/orders/corporation")
+def api_corporation_orders():
+    """Return open orders for the primary character's corporation, summed per type."""
+    token = sso_get_token()
+    # Get char_id from characters table (primary), not legacy kv
+    conn  = get_db()
+    row   = conn.execute(
+        "SELECT character_id FROM characters WHERE is_primary=1 LIMIT 1"
+    ).fetchone()
+    if not row:
+        row = conn.execute("SELECT character_id FROM characters LIMIT 1").fetchone()
+    conn.close()
+    if not token or not row:
+        return jsonify({}), 401
+    char_id = row["character_id"]
+    # Get corp ID
+    char_info, _ = esi_get_authed(f"/characters/{char_id}/", token)
+    if not char_info:
+        return jsonify({})
+    corp_id = char_info.get("corporation_id")
+    if not corp_id:
+        return jsonify({})
+    # Fetch corp orders (all divisions)
+    orders = esi_get_authed_all_pages(
+        f"/corporations/{corp_id}/orders/", token
+    )
+    result = {}
+    for o in orders:
+        if o.get("state", "open") != "open":
+            continue
+        tid = str(o["type_id"])
+        if tid not in result:
+            result[tid] = {"corp_buy": 0, "corp_sell": 0}
+        key = "corp_buy" if o.get("is_buy_order", False) else "corp_sell"
+        result[tid][key] += o.get("volume_remain", 0)
+    return jsonify(result)
+
 
 @app.route("/api/ui/market/<int:type_id>", methods=["POST"])
 def api_open_market_window(type_id):

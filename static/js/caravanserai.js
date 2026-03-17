@@ -2,6 +2,10 @@
   let isAuthenticated = false;
   let sdeReady        = false;
 
+  // Character/corp order overlay
+  let charOrders = {};  // type_id → {char_buy, char_sell}
+  let corpOrders = {};  // type_id → {corp_buy, corp_sell}
+
   // Selected market locations
   const market = {
     src: { id: null, name: null, type: null },  // type: 'npc'|'freeport'|'structure'
@@ -62,37 +66,32 @@
       const data = await res.json();
       const badge     = document.getElementById('authBadge');
       const btnLogin  = document.getElementById('btnLogin');
-      const btnLogout = document.getElementById('btnLogout');
       const cidStatus = document.getElementById('clientIdStatus');
-      const charName  = document.getElementById('authCharName');
 
-      // ── Character auth panel ───────────────────────────────────────────────
+      isAuthenticated = data.authenticated;
+
       if (data.authenticated) {
-        isAuthenticated = true;
-        badge.textContent = '✓ ' + (data.character_name || 'AUTHENTICATED');
+        badge.textContent = '✓ ' + data.characters.length + ' character' + (data.characters.length !== 1 ? 's' : '');
         badge.className   = 'status-badge ok';
-        btnLogin.style.display  = 'none';
-        btnLogout.style.display = 'inline-flex';
-        charName.textContent = data.character_name || '';
+        btnLogin.style.display = 'inline-flex';  // always allow adding more characters
       } else {
-        isAuthenticated = false;
         badge.textContent = 'NOT LOGGED IN';
         badge.className   = 'status-badge missing';
-        btnLogin.style.display  = data.has_client_id ? 'inline-flex' : 'none';
-        btnLogout.style.display = 'none';
-        charName.textContent = '';
+        btnLogin.style.display = data.has_client_id ? 'inline-flex' : 'none';
       }
 
-      // ── Client ID panel — always visible, just shows status ───────────────
+      // Render character list
+      renderCharacterList(data.characters || []);
+
+      // Client ID status
       if (data.has_client_id) {
         cidStatus.innerHTML = '<span style="color:var(--accent3)">✓ Client ID saved</span>';
-        const inp = document.getElementById('clientIdInput');
-        inp.placeholder = 'Update client ID…';
+        document.getElementById('clientIdInput').placeholder = 'Update client ID…';
       } else {
         cidStatus.textContent = '';
       }
 
-      // ── Gate: unlock config + market panels only when both ready ──────────
+      // Gate panels
       const ready = data.authenticated && data.has_client_id;
       const marketPanels = document.getElementById('marketPanels');
       const configPanel  = document.getElementById('configPanel');
@@ -108,11 +107,44 @@
     }
   }
 
+  function renderCharacterList(characters) {
+    const el = document.getElementById('authCharName');
+    if (!characters.length) { el.innerHTML = ''; return; }
+    el.innerHTML = characters.map(c => `
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  padding:4px 0;border-bottom:1px solid rgba(26,58,92,0.4)">
+        <span style="font-size:12px;color:${c.is_primary ? 'var(--accent3)' : 'var(--text)'}">
+          ${c.is_primary ? '★ ' : ''}${c.character_name}
+        </span>
+        <div style="display:flex;gap:4px">
+          ${!c.is_primary ? `<button class="btn" onclick="setPrimary(${c.character_id})"
+            style="padding:2px 6px;font-size:9px;border-color:var(--accent);color:var(--accent)">PRIMARY</button>` : ''}
+          <button class="btn danger" onclick="logoutChar(${c.character_id})"
+            style="padding:2px 6px;font-size:9px">✕</button>
+        </div>
+      </div>`).join('');
+  }
+
   async function _triggerLogin() {
     const res  = await fetch('/api/auth/start', {method:'POST'});
     const data = await res.json();
     if (!data.ok) { toast(data.error || 'Auth failed.', true); return; }
     window.open(data.url, 'eve_sso', 'width=600,height=700,left=200,top=100');
+  }
+
+  async function logoutChar(charId) {
+    await fetch('/api/auth/logout', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({character_id: charId})});
+    isAuthenticated = false;
+    await checkAuthStatus();
+    toast('Character removed.');
+  }
+
+  async function setPrimary(charId) {
+    await fetch('/api/auth/set_primary', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({character_id: charId})});
+    await checkAuthStatus();
+    toast('Primary character updated.');
   }
 
   async function _triggerLogout() {
@@ -234,9 +266,12 @@
     // Show selected panel, hide picker
     document.getElementById(side + 'Selected').style.display = 'block';
     document.getElementById(side + 'Picker').style.display   = 'none';
-    document.getElementById(side + 'Name').textContent = name;
-    document.getElementById(side + 'Meta').textContent = type === 'npc' ? 'NPC Trade Hub' :
-                                                          type === 'freeport' ? 'Freeport Structure' : 'Player Structure';
+    const metaLabel = type === 'npc' ? 'NPC Trade Hub' : type === 'freeport' ? 'Freeport Structure' : 'Player Structure';
+    document.getElementById(side + 'Name').innerHTML =
+      `<span onclick="deselectMarket('${side}')" title="Change market"
+        style="cursor:pointer;margin-right:6px;opacity:0.6;transition:opacity 0.15s;font-size:13px"
+        onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">↺</span>${name}`;
+    document.getElementById(side + 'Meta').textContent = metaLabel;
 
     // Highlight selected card
     document.querySelectorAll(`[id^="${side}-npc-"], [id^="${side}-fp-"], [id^="${side}-struct-"]`)
@@ -253,7 +288,14 @@
     market[side] = { id: null, name: null, type: null };
     document.getElementById(side + 'Selected').style.display = 'none';
     document.getElementById(side + 'Picker').style.display   = 'block';
+    // Reset to NPC Hubs tab
+    const tabNpc = document.querySelector(`#${side}Picker .market-tab`);
+    if (tabNpc) switchTab(side, 'npc', tabNpc);
     updateCompareButton();
+    allRows = []; filteredRows = [];
+    document.getElementById('tableBody').innerHTML =
+      '<tr><td colspan="18"><div class="empty-state"><div class="big">◈</div>Select source &amp; destination markets, then click COMPARE</div></td></tr>';
+    document.getElementById('btnExportCsv').disabled = true;
   }
 
   function updateCompareButton() {
@@ -323,7 +365,7 @@
             onclick="selectMarket('${side}', ${s.id}, '${s.name.replace(/'/g,"\\'")}', 'structure')">
         <div>
           <div class="loc-name">${s.name}</div>
-          <div class="loc-sub" style="font-size:9px">${s.id}</div>
+          <div class="loc-sub">${s.type_name || 'Unknown'}</div>
         </div>
         <div class="loc-badge missing" id="${side}-snap-${s.id}">NO DATA</div>
       </div>`
@@ -372,7 +414,10 @@
       if (loc.id) {
         document.getElementById(side + 'Selected').style.display = 'block';
         document.getElementById(side + 'Picker').style.display   = 'none';
-        document.getElementById(side + 'Name').textContent = loc.name;
+        document.getElementById(side + 'Name').innerHTML =
+          `<span onclick="deselectMarket('\${side}')" title="Change market"
+            style="cursor:pointer;margin-right:6px;opacity:0.6;transition:opacity 0.15s;font-size:13px"
+            onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">↺</span>\${loc.name}`;
         document.getElementById(side + 'Meta').textContent = loc.type === 'npc' ? 'NPC Trade Hub' :
                                                               loc.type === 'freeport' ? 'Freeport Structure' : 'Player Structure';
         checkSnapStatus(side, loc.id);
@@ -426,7 +471,7 @@
     const url = `/api/compare/${market.src.id}/${market.dst.id}` + (dateVal ? `?date=${dateVal}` : '');
 
     document.getElementById('tableBody').innerHTML =
-      '<tr><td colspan="14"><div class="empty-state"><span class="spinner"></span>&nbsp; Loading…</div></td></tr>';
+      '<tr><td colspan="18"><div class="empty-state"><span class="spinner"></span>&nbsp; Loading…</div></td></tr>';
 
     try {
       const res = await fetch(url);
@@ -435,8 +480,38 @@
       await loadFilterOptions();
       applyFilter();
       document.getElementById('btnExportCsv').disabled = !allRows.length;
+      // Load order overlays in background
+      loadOrderOverlays();
     } catch(e) {
       toast('Failed to load comparison.', true);
+    }
+  }
+
+  async function loadOrderOverlays() {
+    try {
+      const [charRes, corpRes] = await Promise.all([
+        fetch('/api/orders/character'),
+        fetch('/api/orders/corporation'),
+      ]);
+      charOrders = charRes.ok ? await charRes.json() : {};
+      corpOrders = corpRes.ok ? await corpRes.json() : {};
+      // Merge into allRows so sort/filter/export can see the fields
+      allRows = allRows.map(r => {
+        const k  = String(r.type_id);
+        const co = charOrders[k] || {};
+        const cr = corpOrders[k] || {};
+        return {
+          ...r,
+          char_sell: co.char_sell || null,
+          char_buy:  co.char_buy  || null,
+          corp_sell: cr.corp_sell || null,
+          corp_buy:  cr.corp_buy  || null,
+        };
+      });
+      // Re-filter so filteredRows gets the merged fields too
+      applyFilter();
+    } catch(e) {
+      charOrders = {}; corpOrders = {};
     }
   }
 
@@ -461,16 +536,33 @@
     } catch(e) {}
   }
 
+  // Meta level groups: 0=T1, 1-4=Meta, 5=T2, 6-9=Faction/Storyline, 10-14=Deadspace, 15=Officer
+  function metaPass(metaLevel, filterVal) {
+    const m = metaLevel || 0;
+    if (filterVal === '')         return true;
+    if (filterVal === 't1')       return m === 0;
+    if (filterVal === 'meta')     return m >= 1 && m <= 4;
+    if (filterVal === 't2')       return m === 5;
+    if (filterVal === 'faction')  return m >= 6 && m <= 9;
+    if (filterVal === 'deadspace')return m >= 10 && m <= 14;
+    if (filterVal === 'officer')  return m === 15;
+    if (filterVal === 'no_dead_off') return m < 10;
+    if (filterVal === 't1_and_t2') return m === 0 || m === 5;
+    return true;
+  }
+
   function applyFilter() {
     const q    = document.getElementById('filterInput').value.toLowerCase();
     const mode = document.getElementById('showMode').value;
     const cat  = document.getElementById('filterCategory').value;
     const grp  = document.getElementById('filterGroup').value;
+    const meta = document.getElementById('filterMeta').value;
 
     filteredRows = allRows.filter(r => {
       if (q    && !r.type_name.toLowerCase().includes(q)) return false;
       if (cat  && r.category_name !== cat) return false;
       if (grp  && r.group_name    !== grp) return false;
+      if (!metaPass(r.meta_level, meta))   return false;
       if (mode === 'src_only' && (r.dst_supply > 0 || r.dst_demand > 0)) return false;
       if (mode === 'both'     && (r.src_supply === 0 || r.dst_supply === 0)) return false;
       if (mode === 'dst_only' && (r.src_supply > 0 || r.src_demand > 0)) return false;
@@ -506,12 +598,19 @@
     sortRows();
   }
 
+  const STRING_COLS = new Set(['type_name', 'category_name', 'group_name']);
+
   function sortRows() {
     filteredRows.sort((a, b) => {
-      const av = a[sortCol]; const bv = b[sortCol];
+      let av = a[sortCol];
+      let bv = b[sortCol];
+      // Push nulls/undefined to the end regardless of sort direction
       if (av === null || av === undefined) return 1;
       if (bv === null || bv === undefined) return -1;
-      if (typeof av === 'string') return sortDir * av.localeCompare(bv);
+      // String columns: alphabetic
+      if (STRING_COLS.has(sortCol)) return sortDir * String(av).localeCompare(String(bv));
+      // Everything else: coerce to number
+      av = Number(av); bv = Number(bv);
       return sortDir * (av - bv);
     });
     page = 1;
@@ -524,7 +623,7 @@
     const total = filteredRows.length;
     document.getElementById('rowCount').textContent = total + ' items';
     if (!total) {
-      tbody.innerHTML = '<tr><td colspan="14"><div class="empty-state"><div class="big">◈</div>No items match your filter.</div></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="18"><div class="empty-state"><div class="big">◈</div>No items match your filter.</div></td></tr>';
       updatePager(0); return;
     }
     const start = (page - 1) * PAGE_SIZE;
@@ -540,6 +639,10 @@
         <td>${fmt(r.dst_supply)}</td>
         <td>${fmt(r.dst_demand)}</td>
         <td>${fmtISK(r.dst_split)}</td>
+        <td style="color:var(--accent3)">${fmtOrder(r.char_sell)}</td>
+        <td style="color:var(--accent2)">${fmtOrder(r.char_buy)}</td>
+        <td style="color:var(--accent3)">${fmtOrder(r.corp_sell)}</td>
+        <td style="color:var(--accent2)">${fmtOrder(r.corp_buy)}</td>
         <td class="margin-cell" style="color:${spreadColor(r.src_spread)}">${fmtSpread(r.src_spread)}</td>
         <td class="margin-cell" style="color:${spreadColor(r.dst_spread)}">${fmtSpread(r.dst_spread)}</td>
         <td class="margin-cell" style="color:${marginColor(r.import_margin,r.dst_sell,r.src_buy)}">${fmtMargin(r.import_margin,r.dst_sell,r.src_buy,'import')}</td>
@@ -556,16 +659,62 @@
 
   function updatePager(total) {
     const pages = Math.ceil(total / PAGE_SIZE);
-    document.getElementById('pagerInfo').textContent = total ? `Page ${page}/${pages} · ${total} rows` : '';
-    document.getElementById('btnPrev').disabled = page <= 1;
-    document.getElementById('btnNext').disabled = page >= pages;
+
+    for (const suffix of ['', 'Top']) {
+      const info = document.getElementById('pagerInfo' + suffix);
+      if (!info) continue;
+      if (!total) { info.innerHTML = ''; continue; }
+
+      info.innerHTML = `
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:4px">
+          Page
+          <input id="pageInput${suffix}" type="number" min="1" max="${pages}" value="${page}"
+            style="width:${String(pages).length + 2}ch;background:var(--bg3);border:1px solid var(--border);
+                   color:var(--text);font-family:var(--mono);font-size:11px;padding:1px 4px;
+                   border-radius:2px;text-align:center;outline:none;
+                   -moz-appearance:textfield;appearance:textfield"
+            onfocus="this.style.background='var(--bg2)';this.style.borderColor='var(--accent)';this.select()"
+            onblur="commitPage(this,'${suffix}',${pages})"
+            onkeydown="if(event.key==='Enter'){this.blur()}else if(event.key==='Escape'){this.value=${page};this.blur()}"
+            oninput="this.value=this.value.replace(/[^0-9]/g,'')">
+          / ${pages}
+          &nbsp;·&nbsp; ${total} rows
+        </span>`;
+    }
+
+    document.getElementById('btnPrev').disabled    = page <= 1;
+    document.getElementById('btnNext').disabled    = page >= pages;
+    document.getElementById('btnPrevTop').disabled = page <= 1;
+    document.getElementById('btnNextTop').disabled = page >= pages;
   }
+
+  function commitPage(input, suffix, maxPages) {
+    input.style.background   = 'var(--bg3)';
+    input.style.borderColor  = 'var(--border)';
+    const n = parseInt(input.value);
+    if (!isNaN(n) && n >= 1 && n <= maxPages && n !== page) {
+      page = n;
+      renderTable();
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    } else {
+      input.value = page; // reset to current if invalid
+    }
+  }
+
+  function jumpToPage() {} // no longer used, kept as no-op for safety
 
   function changePage(delta) {
     page += delta;
     renderTable();
     window.scrollTo({top:0, behavior:'smooth'});
   }
+
+  // Arrow key navigation — but not when typing in an input/select
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft'  && page > 1) { page--; renderTable(); window.scrollTo({top:0,behavior:'smooth'}); }
+    if (e.key === 'ArrowRight' && filteredRows.length > page * PAGE_SIZE) { page++; renderTable(); window.scrollTo({top:0,behavior:'smooth'}); }
+  });
 
   // ─── Formatting ───────────────────────────────────────────────────────────
   function fmt(v) {
@@ -613,6 +762,11 @@
     if (v >= 10) return 'var(--accent2)';
     if (v >=  2) return 'var(--accent)';
     return 'var(--text-dim)';
+  }
+
+  function fmtOrder(v) {
+    if (!v) return '<span style="color:var(--text-dim)">—</span>';
+    return fmt(v);
   }
 
   function fmtSpread(v) {
