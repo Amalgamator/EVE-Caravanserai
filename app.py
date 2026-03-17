@@ -1996,10 +1996,21 @@ def api_update_apply():
 
     app_dir = os.path.dirname(os.path.abspath(__file__))
     try:
+        # Stash any local changes (e.g. DB files not in .gitignore) so the
+        # pull can proceed, then pop the stash immediately after.
+        subprocess.run(
+            ["git", "stash", "--include-untracked", "--quiet"],
+            cwd=app_dir, capture_output=True, timeout=10,
+        )
         result = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=app_dir,
             capture_output=True, text=True, timeout=30,
+        )
+        # Restore stash regardless of pull result
+        subprocess.run(
+            ["git", "stash", "pop", "--quiet"],
+            cwd=app_dir, capture_output=True, timeout=10,
         )
         if result.returncode != 0:
             log.error("[Update] git pull failed: %s", result.stderr.strip())
@@ -2036,12 +2047,27 @@ def api_update_apply():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # When restarting after an update, give the parent process time to exit
-    # and release the port before we try to bind it.
+    # When restarting after an update, wait for the parent process to fully
+    # release the socket before attempting to bind. The parent calls os._exit(0)
+    # after spawning us, but the OS may take a moment to release the port.
     if os.environ.get("_CARAVANSERAI_RESTART"):
-        time.sleep(1.0)
+        time.sleep(1.5)
+
     init_db()
     if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         threading.Thread(target=_ensure_universe_cache, daemon=True).start()
         threading.Thread(target=_scrape_freeports, daemon=True).start()
-    app.run(debug=False, port=8182)
+
+    # Retry binding the port a few times — the previous process may still be
+    # releasing the socket when we start (especially after an auto-update).
+    port = 8182
+    for attempt in range(5):
+        try:
+            app.run(debug=False, port=port)
+            break
+        except OSError as e:
+            if "Address already in use" in str(e) and attempt < 4:
+                log.warning("Port %d in use, retrying in 1s… (%d/4)", port, attempt + 1)
+                time.sleep(1.0)
+            else:
+                raise
