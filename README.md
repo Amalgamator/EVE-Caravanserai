@@ -210,14 +210,8 @@ Everything runs locally. Your Client ID, character tokens, and all market data a
 
 ## Upcoming Features
 
-- Mark player and corporation orders in a different color
-- When the user wants to select new structures/stations as source and destination, we now use a page refresh. This could be made user-friendly by adding a deselect button of sorts.
-- We want a filter for meta levels ('show only T1' or 'show T1 up to deadspace' or 'no deadspace and officer')
-- Easier pagination / page navigation in results.
-- Ability to type and go to the page in the page/pages info blurb. Repeat above and below results.
 - Data legend redesign.
 
 # Known Issues
 
-- Client id field needs to be a password field, to hide it
 - Remnant/exotic skin items not classified under the normal skin item group still appearing
