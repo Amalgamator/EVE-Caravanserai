@@ -22,6 +22,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -1910,12 +1911,11 @@ def api_open_wallet_window():
 # ---------------------------------------------------------------------------
 
 GITHUB_REPO     = "Amalgamator/EVE-Caravanserai"
-CURRENT_VERSION = "v0.1.0-alpha"   # keep in sync with git tags
+CURRENT_VERSION = "v0.2.2-alpha"   # keep in sync with git tags
 
 
 def _is_git_repo() -> bool:
     """Return True if app.py is running inside a git working tree."""
-    import subprocess
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -1991,8 +1991,6 @@ def api_update_apply():
     response can be delivered first. The client should poll /api/update/check
     until the new version is reported, then reload.
     """
-    import subprocess
-
     if not _is_git_repo():
         return jsonify({"ok": False, "error": "Not running from a git repo. Update manually."}), 400
 
@@ -2014,13 +2012,22 @@ def api_update_apply():
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
-    # Restart in a thread so this response is delivered first
+    # Restart in a thread so this response is delivered first.
+    # We cannot use os.execv directly because the Flask server still holds
+    # the socket open — the replacement process would fail to bind port 8182.
+    # Instead: spawn a fresh child process, then exit the current one.
+    # The child waits 1s to ensure the parent has fully released the socket.
     def _restart():
-        time.sleep(0.8)
+        time.sleep(0.5)
         log.info("[Update] Restarting process...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        subprocess.Popen(
+            [sys.executable] + sys.argv,
+            env={**os.environ, "_CARAVANSERAI_RESTART": "1"},
+        )
+        # Hard exit — releases the socket immediately
+        os._exit(0)
 
-    threading.Thread(target=_restart, daemon=True).start()
+    threading.Thread(target=_restart, daemon=False).start()
     return jsonify({"ok": True, "output": result.stdout.strip()})
 
 
@@ -2029,6 +2036,10 @@ def api_update_apply():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # When restarting after an update, give the parent process time to exit
+    # and release the port before we try to bind it.
+    if os.environ.get("_CARAVANSERAI_RESTART"):
+        time.sleep(1.0)
     init_db()
     if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         threading.Thread(target=_ensure_universe_cache, daemon=True).start()
