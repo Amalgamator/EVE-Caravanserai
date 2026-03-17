@@ -1911,7 +1911,7 @@ def api_open_wallet_window():
 # ---------------------------------------------------------------------------
 
 GITHUB_REPO     = "Amalgamator/EVE-Caravanserai"
-CURRENT_VERSION = "v0.2.2-alpha"   # keep in sync with git tags
+CURRENT_VERSION = "v0.1.0-alpha"   # keep in sync with git tags
 
 
 def _is_git_repo() -> bool:
@@ -1996,21 +1996,18 @@ def api_update_apply():
 
     app_dir = os.path.dirname(os.path.abspath(__file__))
     try:
-        # Stash any local changes (e.g. DB files not in .gitignore) so the
-        # pull can proceed, then pop the stash immediately after.
+        # If .gitignore is correct, untracked files (DBs, etc.) are invisible
+        # to git and won't block the pull. Only staged/modified tracked files
+        # can block --ff-only. Reset any unintentional local modifications to
+        # tracked files so the pull always succeeds cleanly.
         subprocess.run(
-            ["git", "stash", "--include-untracked", "--quiet"],
+            ["git", "checkout", "--", "."],
             cwd=app_dir, capture_output=True, timeout=10,
         )
         result = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=app_dir,
             capture_output=True, text=True, timeout=30,
-        )
-        # Restore stash regardless of pull result
-        subprocess.run(
-            ["git", "stash", "pop", "--quiet"],
-            cwd=app_dir, capture_output=True, timeout=10,
         )
         if result.returncode != 0:
             log.error("[Update] git pull failed: %s", result.stderr.strip())
