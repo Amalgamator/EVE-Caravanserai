@@ -1911,7 +1911,7 @@ def api_open_wallet_window():
 # ---------------------------------------------------------------------------
 
 GITHUB_REPO     = "Amalgamator/EVE-Caravanserai"
-CURRENT_VERSION = "v0.2.3-alpha"   # keep in sync with git tags
+CURRENT_VERSION = "v0.2.4-alpha"   # keep in sync with git tags
 
 
 def _is_git_repo() -> bool:
