@@ -2,7 +2,12 @@
 caravanserai.db
 universeData.db
 userConfig.db
-private.pem
+userConfig.db-shm
+userConfig.db-wal
+caravanserai.db-shm
+caravanserai.db-wal
+universeData.db-shm
+universeData.db-wal
 
 # Python
 __pycache__/
