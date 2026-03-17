@@ -1,5 +1,8 @@
-# EVE Caravanserai
+# EVE Caravanserai — databases (never commit these)
 caravanserai.db
+universeData.db
+userConfig.db
+private.pem
 
 # Python
 __pycache__/

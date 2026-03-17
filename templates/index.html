@@ -21,6 +21,7 @@
       ⬡ Support This Tool
     </button>
     <div class="header-status" id="headerDate">—</div>
+    <div id="updateBadge" style="display:none;font-family:var(--mono);font-size:10px"></div>
   </div>
 </header>
 
@@ -39,7 +40,6 @@
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
             <button id="btnLogin"  class="btn"        onclick="_triggerLogin()"  style="display:none">⬡ LOGIN</button>
-            <button id="btnLogout" class="btn danger" onclick="_triggerLogout()" style="display:none">LOGOUT</button>
           </div>
         </div>
         <div id="authCharName" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:8px"></div>
@@ -143,7 +143,7 @@
     <div class="panel">
       <div class="panel-header"><span class="icon">◀</span> Destination Market</div>
       <div class="panel-body">
-        <div id="dstSelected" style="display:none" class="selected-loc" style="border-color:var(--accent3)">
+        <div id="dstSelected" style="display:none;border-color:var(--accent3)" class="selected-loc">
           <div class="name" id="dstName">—</div>
           <div class="meta" id="dstMeta">—</div>
           <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
@@ -224,17 +224,17 @@
           </select>
 
           <span class="toolbar-label">META:</span>
-          <select class="select-input" id="filterMeta" onchange="applyFilter()" style="max-width:180px">
-            <option value="">All</option>
-            <option value="t1">Tech I only</option>
-            <option value="meta">Meta (1–4)</option>
-            <option value="t2">Tech II</option>
-            <option value="faction">Faction &amp; Storyline</option>
-            <option value="deadspace">Deadspace</option>
-            <option value="officer">Officer</option>
-            <option value="no_dead_off">No Deadspace/Officer</option>
-            <option value="t1_and_t2">T1 + T2 only</option>
-          </select>
+          <div id="metaFilter" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+            <!-- Pills rendered by JS once data loads, or shown immediately -->
+            <button class="meta-pill active" data-meta="t1"        onclick="toggleMetaPill(this)">T1</button>
+            <button class="meta-pill active" data-meta="meta"      onclick="toggleMetaPill(this)">Meta</button>
+            <button class="meta-pill active" data-meta="t2"        onclick="toggleMetaPill(this)">T2/T3</button>
+            <button class="meta-pill active" data-meta="storyline" onclick="toggleMetaPill(this)">Storyline</button>
+            <button class="meta-pill active" data-meta="faction"   onclick="toggleMetaPill(this)">Faction</button>
+            <button class="meta-pill active" data-meta="deadspace" onclick="toggleMetaPill(this)">Deadspace</button>
+            <button class="meta-pill active" data-meta="officer"   onclick="toggleMetaPill(this)">Officer</button>
+            <button class="meta-pill active" data-meta="null"      onclick="toggleMetaPill(this)">?</button>
+          </div>
 
           <span style="margin-left:auto" id="rowCount" class="toolbar-label"></span>
           <button class="btn" id="btnExportCsv" onclick="exportCsv()" disabled
@@ -296,6 +296,7 @@
   </div>
 </div>
 
+<div id="ctxMenu" style="display:none;position:fixed;z-index:9999"></div>
 <div id="toast"></div>
 
 <script src="/static/js/caravanserai.js"></script>

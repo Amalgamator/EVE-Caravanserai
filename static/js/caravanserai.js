@@ -57,7 +57,87 @@
     setTimeout(checkAuthStatus, 150);
     loadNpcHubs();
     loadFreeports();
+    setTimeout(checkForUpdate, 5000);  // check after 5s so it doesn't block startup
   };
+
+  async function checkForUpdate() {
+    try {
+      const res  = await fetch('/api/update/check');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.up_to_date) return;
+
+      const badge = document.getElementById('updateBadge');
+      badge.style.display = 'inline-flex';
+      badge.style.gap = '6px';
+      badge.style.alignItems = 'center';
+
+      // Always show a link to the release notes
+      const releaseLink =
+        `<a href="${data.url}" target="_blank"
+            style="color:var(--accent2);text-decoration:none;font-family:var(--mono);
+                   font-size:10px;letter-spacing:1px"
+            title="${(data.notes || 'New release available').replace(/"/g,'&quot;')}">
+           ↑ ${data.latest}
+         </a>`;
+
+      if (data.can_update) {
+        // Running from git — offer a one-click update
+        badge.innerHTML = releaseLink +
+          `<button id="btnApplyUpdate"
+              style="background:rgba(0,200,255,0.15);border:1px solid var(--accent2);
+                     color:var(--accent2);font-family:var(--mono);font-size:10px;
+                     letter-spacing:1px;padding:3px 8px;cursor:pointer;border-radius:2px"
+              onclick="applyUpdate(this, '${data.latest}')">
+             UPDATE
+           </button>`;
+      } else {
+        // Not a git clone — just show the version link
+        badge.innerHTML = releaseLink;
+      }
+    } catch(e) {}
+  }
+
+  async function applyUpdate(btn, version) {
+    btn.disabled    = true;
+    btn.textContent = 'UPDATING…';
+
+    try {
+      const res  = await fetch('/api/update/apply', {method: 'POST'});
+      const data = await res.json();
+
+      if (!data.ok) {
+        btn.textContent = 'FAILED';
+        btn.style.color = 'var(--danger)';
+        toast(data.error || 'Update failed.', true);
+        return;
+      }
+
+      btn.textContent = 'RESTARTING…';
+      toast(`Updated to ${version}. Reloading…`);
+
+      // Poll until the server comes back up, then reload
+      await _waitForRestart();
+      window.location.reload();
+
+    } catch(e) {
+      btn.textContent = 'FAILED';
+      btn.style.color = 'var(--danger)';
+      toast('Update request failed.', true);
+    }
+  }
+
+  async function _waitForRestart(attempts = 0) {
+    if (attempts > 30) return;  // give up after ~15s
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const res = await fetch('/api/update/check', {cache: 'no-store'});
+      if (res.ok) return;  // server is back
+    } catch(e) {
+      // Server is restarting — keep waiting
+    }
+    return _waitForRestart(attempts + 1);
+  }
 
   // ─── Auth ─────────────────────────────────────────────────────────────────
   async function checkAuthStatus() {
@@ -217,25 +297,55 @@
 
   // ─── Freeports ────────────────────────────────────────────────────────────
   async function loadFreeports() {
-    const res   = await fetch('/api/freeports');
-    const ports = await res.json();
     for (const side of ['src','dst']) {
-      const el = document.getElementById(side + '-tab-freeport');
-      if (!ports.length) {
-        el.innerHTML = '<div style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:8px 0">No freeports cached yet.</div>';
-        return;
-      }
-      el.innerHTML = ports.map(p => `
-        <div class="loc-card" id="${side}-fp-${p.id}"
-             onclick="selectMarket('${side}', ${p.id}, '${p.name}', 'freeport')">
-          <div>
-            <div class="loc-name">${p.name}</div>
-            <div class="loc-sub">${p.system}</div>
-          </div>
-          <div class="loc-badge missing" id="${side}-snap-${p.id}">NO DATA</div>
-        </div>`).join('');
-      ports.forEach(p => checkSnapStatus(side, p.id));
+      document.getElementById(side + '-tab-freeport').innerHTML =
+        '<span class="spinner"></span> Loading…';
     }
+    try {
+      const res   = await fetch('/api/freeports');
+      const ports = await res.json();
+      for (const side of ['src','dst']) {
+        const el = document.getElementById(side + '-tab-freeport');
+        if (!ports.length) {
+          el.innerHTML = '<div style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:8px 0">' +
+            'No freeports found yet. Refresh to scan A4E.' +
+            '<br><button class="btn" onclick="refreshFreeports()" style="margin-top:8px;padding:4px 10px;font-size:10px">↺ REFRESH</button></div>';
+          continue;
+        }
+        el.innerHTML =
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+          '<span style="font-family:var(--mono);font-size:10px;color:var(--text-dim)">' + ports.length + ' markets</span>' +
+          '<button class="btn" onclick="refreshFreeports()" style="padding:2px 8px;font-size:9px">↺ REFRESH</button></div>' +
+          ports.map(p => {
+            const sell = p.sell_orders ? p.sell_orders.toLocaleString() + ' sell' : '';
+            return `<div class="loc-card" id="${side}-fp-${p.id}"
+                 data-name="${p.name.replace(/"/g, '&quot;')}"
+                 onclick="selectMarket('${side}', ${p.id}, this.dataset.name, 'freeport')"
+                 oncontextmenu="showContextMenu(event, ${p.id}, this.dataset.name)">
+              <div style="min-width:0">
+                <div class="loc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+                <div class="loc-sub">${p.system}${p.region ? ' · ' + p.region : ''}</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0">
+                <div class="loc-badge missing" id="${side}-snap-${p.id}" style="margin-bottom:3px">NO DATA</div>
+                ${sell ? '<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">' + sell + '</div>' : ''}
+              </div>
+            </div>`;
+          }).join('');
+        ports.forEach(p => checkSnapStatus(side, p.id));
+      }
+    } catch(e) {
+      for (const side of ['src','dst']) {
+        document.getElementById(side + '-tab-freeport').innerHTML =
+          '<div style="font-family:var(--mono);font-size:11px;color:var(--danger)">Failed to load freeports.</div>';
+      }
+    }
+  }
+
+  async function refreshFreeports() {
+    await fetch('/api/freeports/refresh', {method:'POST'});
+    toast('Refreshing market hub list from A4E…');
+    setTimeout(loadFreeports, 3000);  // give the scraper a moment
   }
 
   // ─── Snapshot status ──────────────────────────────────────────────────────
@@ -267,10 +377,12 @@
     document.getElementById(side + 'Selected').style.display = 'block';
     document.getElementById(side + 'Picker').style.display   = 'none';
     const metaLabel = type === 'npc' ? 'NPC Trade Hub' : type === 'freeport' ? 'Freeport Structure' : 'Player Structure';
-    document.getElementById(side + 'Name').innerHTML =
+    const _nameEl = document.getElementById(side + 'Name');
+    _nameEl.innerHTML =
       `<span onclick="deselectMarket('${side}')" title="Change market"
         style="cursor:pointer;margin-right:6px;opacity:0.6;transition:opacity 0.15s;font-size:13px"
         onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">↺</span>${name}`;
+    _nameEl.oncontextmenu = e => showContextMenu(e, id, name);
     document.getElementById(side + 'Meta').textContent = metaLabel;
 
     // Highlight selected card
@@ -362,7 +474,9 @@
     }
     list.innerHTML = data.map(s =>
       `<div class="loc-card" id="${side}-struct-${s.id}"
-            onclick="selectMarket('${side}', ${s.id}, '${s.name.replace(/'/g,"\\'")}', 'structure')">
+            data-name="${s.name.replace(/"/g, '&quot;')}"
+            oncontextmenu="showContextMenu(event, ${s.id}, this.dataset.name)"
+            onclick="selectMarket('${side}', ${s.id}, this.dataset.name, 'structure')">
         <div>
           <div class="loc-name">${s.name}</div>
           <div class="loc-sub">${s.type_name || 'Unknown'}</div>
@@ -414,10 +528,13 @@
       if (loc.id) {
         document.getElementById(side + 'Selected').style.display = 'block';
         document.getElementById(side + 'Picker').style.display   = 'none';
-        document.getElementById(side + 'Name').innerHTML =
-          `<span onclick="deselectMarket('\${side}')" title="Change market"
-            style="cursor:pointer;margin-right:6px;opacity:0.6;transition:opacity 0.15s;font-size:13px"
-            onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">↺</span>\${loc.name}`;
+        const _swapEl = document.getElementById(side + 'Name');
+        _swapEl.innerHTML =
+          '<span onclick="deselectMarket(\'' + side + '\')" title="Change market"'
+          + ' style="cursor:pointer;margin-right:6px;opacity:0.6;transition:opacity 0.15s;font-size:13px"'
+          + ' onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">↺</span>'
+          + loc.name;
+        _swapEl.oncontextmenu = e => showContextMenu(e, loc.id, loc.name);
         document.getElementById(side + 'Meta').textContent = loc.type === 'npc' ? 'NPC Trade Hub' :
                                                               loc.type === 'freeport' ? 'Freeport Structure' : 'Player Structure';
         checkSnapStatus(side, loc.id);
@@ -437,8 +554,8 @@
         src_split:  r.dst_split,  src_sell:   r.dst_sell,  src_buy: r.dst_buy,
         dst_supply: r.src_supply, dst_demand: r.src_demand,
         dst_split:  r.src_split,  dst_sell:   r.src_sell,  dst_buy: r.src_buy,
-        sd_supply: r.sd_supply ? round(r.src_supply / r.dst_supply * 100, 2) : null,
-        sd_demand: r.sd_demand ? round(r.src_demand / r.dst_demand * 100, 2) : null,
+        src_spread: r.dst_spread,
+        dst_spread: r.src_spread,
       }));
       applyFilter();
       toast('Markets swapped. Import/export recalculated.');
@@ -489,9 +606,10 @@
 
   async function loadOrderOverlays() {
     try {
+      const params = `src=${market.src.id}&dst=${market.dst.id}`;
       const [charRes, corpRes] = await Promise.all([
-        fetch('/api/orders/character'),
-        fetch('/api/orders/corporation'),
+        fetch(`/api/orders/character?${params}`),
+        fetch(`/api/orders/corporation?${params}`),
       ]);
       charOrders = charRes.ok ? await charRes.json() : {};
       corpOrders = corpRes.ok ? await corpRes.json() : {};
@@ -529,26 +647,44 @@
       catSel.innerHTML = '<option value="">All</option>' +
         data.categories.map(c => `<option value="${c}"${c===curCat?' selected':''}>${c}</option>`).join('');
 
-      // Populate group dropdown — filtered to categories present in current data
-      const activeCats = new Set(allRows.map(r => r.category_name).filter(Boolean));
+      // Populate group dropdown (category filtering is handled live in applyFilter)
       grpSel.innerHTML = '<option value="">All</option>' +
         data.groups.map(g => `<option value="${g}"${g===curGrp?' selected':''}>${g}</option>`).join('');
     } catch(e) {}
   }
 
-  // Meta level groups: 0=T1, 1-4=Meta, 5=T2, 6-9=Faction/Storyline, 10-14=Deadspace, 15=Officer
-  function metaPass(metaLevel, filterVal) {
-    const m = metaLevel || 0;
-    if (filterVal === '')         return true;
-    if (filterVal === 't1')       return m === 0;
-    if (filterVal === 'meta')     return m >= 1 && m <= 4;
-    if (filterVal === 't2')       return m === 5;
-    if (filterVal === 'faction')  return m >= 6 && m <= 9;
-    if (filterVal === 'deadspace')return m >= 10 && m <= 14;
-    if (filterVal === 'officer')  return m === 15;
-    if (filterVal === 'no_dead_off') return m < 10;
-    if (filterVal === 't1_and_t2') return m === 0 || m === 5;
-    return true;
+  // In-game metaLevel values (stored as meta_level in type_groups):
+  //   0/null = Tech I ("Level 0") or unclassified
+  //   1–4    = Meta variants ("Level 1–4")
+  //   5      = Tech II / Tech III
+  //   6      = Storyline
+  //   7–9    = Faction
+  //   10–14  = Deadspace
+  //   15     = Officer
+  //   other  = null / unclassified
+
+  function getMetaBucket(metaLevel) {
+    const m = (metaLevel === null || metaLevel === undefined) ? -1 : metaLevel;
+    if (m === 0)                return 't1';
+    if (m >= 1 && m <= 4)       return 'meta';
+    if (m === 5)                return 't2';
+    if (m === 6)                return 'storyline';
+    if (m >= 7 && m <= 9)       return 'faction';
+    if (m >= 10 && m <= 14)     return 'deadspace';
+    if (m === 15)               return 'officer';
+    return 'null';  // -1 (unset) or any other value
+  }
+
+  function getActiveMetaPills() {
+    return new Set(
+      Array.from(document.querySelectorAll('.meta-pill.active'))
+           .map(p => p.dataset.meta)
+    );
+  }
+
+  function toggleMetaPill(el) {
+    el.classList.toggle('active');
+    applyFilter();
   }
 
   function applyFilter() {
@@ -556,13 +692,15 @@
     const mode = document.getElementById('showMode').value;
     const cat  = document.getElementById('filterCategory').value;
     const grp  = document.getElementById('filterGroup').value;
-    const meta = document.getElementById('filterMeta').value;
+    const activeMeta = getActiveMetaPills();
+    const allPills   = document.querySelectorAll('.meta-pill').length;
+    const metaAllOn  = activeMeta.size === allPills;
 
     filteredRows = allRows.filter(r => {
       if (q    && !r.type_name.toLowerCase().includes(q)) return false;
       if (cat  && r.category_name !== cat) return false;
       if (grp  && r.group_name    !== grp) return false;
-      if (!metaPass(r.meta_level, meta))   return false;
+      if (!metaAllOn && !activeMeta.has(getMetaBucket(r.meta_level))) return false;
       if (mode === 'src_only' && (r.dst_supply > 0 || r.dst_demand > 0)) return false;
       if (mode === 'both'     && (r.src_supply === 0 || r.dst_supply === 0)) return false;
       if (mode === 'dst_only' && (r.src_supply > 0 || r.src_demand > 0)) return false;
@@ -701,12 +839,61 @@
     }
   }
 
-  function jumpToPage() {} // no longer used, kept as no-op for safety
-
   function changePage(delta) {
     page += delta;
     renderTable();
     window.scrollTo({top:0, behavior:'smooth'});
+  }
+
+  // ─── Context menu ─────────────────────────────────────────────────────────
+  // Suppress the browser default context menu everywhere except inputs,
+  // textareas, and table cells (so text is still selectable/copyable).
+  document.addEventListener('contextmenu', e => {
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.target.closest('td') || e.target.closest('th')) return;
+    e.preventDefault();
+    hideContextMenu();
+  });
+
+  const _ctxMenu = document.getElementById('ctxMenu');
+
+  function showContextMenu(e, locationId, locationName) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isAuthenticated) return;
+    _ctxMenu.innerHTML =
+      `<div class="ctx-item" onclick="setWaypoint(${locationId},'primary',this.closest('#ctxMenu').dataset.name)">✦ Set Destination (Primary)</div>`
+      + `<div class="ctx-item" onclick="setWaypoint(${locationId},'all',this.closest('#ctxMenu').dataset.name)">✦ Set Destination (All Characters)</div>`;
+    _ctxMenu.dataset.name = locationName;
+    const mx = e.clientX, my = e.clientY;
+    _ctxMenu.style.left    = 'px'; // position after display so offsetWidth is valid
+    _ctxMenu.style.top     = 'px';
+    _ctxMenu.style.display = 'block';
+    const mw = _ctxMenu.offsetWidth, mh = _ctxMenu.offsetHeight;
+    _ctxMenu.style.left = (mx + mw > window.innerWidth  ? mx - mw : mx) + 'px';
+    _ctxMenu.style.top  = (my + mh > window.innerHeight ? my - mh : my) + 'px';
+  }
+
+  function hideContextMenu() { if (_ctxMenu) _ctxMenu.style.display = 'none'; }
+
+  document.addEventListener('click',  hideContextMenu);
+  document.addEventListener('scroll', hideContextMenu, true);
+
+  async function setWaypoint(locationId, scope, locationName) {
+    hideContextMenu();
+    try {
+      const res  = await fetch(`/api/ui/waypoint/${locationId}?scope=${scope}`, {method: 'POST'});
+      const data = await res.json();
+      if (data.ok) {
+        toast(`Destination set: ${locationName}`);
+      } else {
+        const failed = (data.results || []).filter(r => !r.ok).map(r => r.char).join(', ');
+        toast(`Waypoint failed${failed ? ' for ' + failed : ''}.`, true);
+      }
+    } catch(e) {
+      toast('Waypoint request failed.', true);
+    }
   }
 
   // Arrow key navigation — but not when typing in an input/select
@@ -776,7 +963,7 @@
 
   function marginColor(v, numerator, denominator) {
     if (v === null || v === undefined) return 'transparent';
-    const clamped = Math.max(100, Math.min(v, 200));
+    const clamped = Math.min(200, Math.max(100, v));
     const stops = [
       [100, [43,  117, 222]],
       [125, [0,   255, 157]],

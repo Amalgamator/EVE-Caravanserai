@@ -12,16 +12,17 @@ Opens:  http://127.0.0.1:8182
 from __future__ import annotations
 
 import base64
-import bz2
 import csv
 import gzip
 import hashlib
 import io
 import json
+import zipfile
 import logging
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -52,7 +53,9 @@ logging.getLogger("werkzeug").setLevel(logging.INFO)
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
-DB_PATH           = "caravanserai.db"
+DB_UNIVERSE   = "universeData.db"    # SDE map + type data — rebuild on SDE update
+DB_MARKET     = "caravanserai.db"   # snapshots, structure names, freeports
+DB_USER       = "userConfig.db"     # characters, client ID, kv config
 ESI_BASE          = "https://esi.evetech.net/latest"
 SDE_BASE          = "https://www.fuzzwork.co.uk/dump/latest"
 FUZZWORKS_CSV_URL = "https://market.fuzzwork.co.uk/aggregatecsv.csv.gz"
@@ -115,13 +118,9 @@ NPC_HUBS = {
     },
 }
 
-# Pre-cached freeport structures (system → structure_id).
-# These are pre-loaded so users don't need to search for the most common ones.
-KNOWN_FREEPORTS = {
-    "Perimeter":  1028858195912,  # Tranquility Trading Tower
-    "Ashab":      1030049082711,  # Ashab - IChooseYou Trade Hub
-    "Amamake":    1028979195912,  # Amamake - 3 Final Countdown
-}
+A4E_MARKET_HUBS_URL = "https://www.adam4eve.eu/market_hubs.php"
+# NPC station IDs to exclude from freeport scraping
+NPC_STATION_IDS = set(NPC_HUBS.keys())
 
 # ---------------------------------------------------------------------------
 # EVE SSO  (PKCE — public client, no secret required)
@@ -134,7 +133,8 @@ KNOWN_FREEPORTS = {
 #   esi-universe.read_structures.v1     resolve structure names/details
 #   esi-search.search_structures.v1     search structures by system name
 #   esi-markets.structure_markets.v1    fetch structure market orders
-#   esi-ui.open_window.v1               open in-game windows
+#   esi-ui.open_window.v1               open in-game windows (market details, info)
+#   esi-ui.write_waypoint.v1            set autopilot destination/waypoints
 #   publicData                          public character info
 #   esi-corporations.read_structures.v1 corp-visible structures
 #   esi-structures.read_character.v1    character-visible structures
@@ -149,6 +149,7 @@ SSO_SCOPES    = " ".join([
     "esi-search.search_structures.v1",
     "esi-markets.structure_markets.v1",
     "esi-ui.open_window.v1",
+    "esi-ui.write_waypoint.v1",               # set autopilot destination
     "esi-markets.read_character_orders.v1",   # character buy/sell order quantities
     "esi-markets.read_corporation_orders.v1", # corporation buy/sell order quantities
 ])
@@ -157,19 +158,38 @@ SSO_SCOPES    = " ".join([
 # Database
 # ---------------------------------------------------------------------------
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+def _open_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
+def get_db()      -> sqlite3.Connection: return _open_db(DB_MARKET)
+def get_universe() -> sqlite3.Connection: return _open_db(DB_UNIVERSE)
+def get_user()     -> sqlite3.Connection: return _open_db(DB_USER)
 
-def init_db() -> None:
-    conn = get_db()
-    conn.executescript("""
-        -- Unified market snapshots table.
-        -- location_id is either a station_id (NPC hub) or a structure_id.
+
+# ---------------------------------------------------------------------------
+# Database migrations
+# ---------------------------------------------------------------------------
+# Each entry is (version: int, db: str, sql: str).
+# Migrations are applied in version order on startup — never modified, only
+# appended. Users keep their data; only schema changes are applied.
+# db is one of: 'market', 'universe', 'user'
+#
+# How to add a migration:
+#   1. Append a new tuple with the next version number.
+#   2. Write forward-only SQL (ADD COLUMN, CREATE TABLE, CREATE INDEX, etc.).
+#   3. Bump CURRENT_VERSION in the auto-updater section when you tag a release.
+#
+# SQLite limitations: ALTER TABLE only supports ADD COLUMN.
+# To rename/drop columns, use the CREATE+INSERT+DROP pattern.
+# ---------------------------------------------------------------------------
+
+MIGRATIONS: list[tuple[int, str, str]] = [
+    # ── v1: initial schema ────────────────────────────────────────────────
+    (1, "market", """
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             snapshot_date     TEXT    NOT NULL,
@@ -182,24 +202,8 @@ def init_db() -> None:
             split_price       REAL,
             UNIQUE(snapshot_date, location_id, type_id)
         );
-
         CREATE INDEX IF NOT EXISTS idx_ms_loc_date
             ON market_snapshots(location_id, snapshot_date);
-
-        CREATE TABLE IF NOT EXISTS type_names (
-            type_id INTEGER PRIMARY KEY,
-            name    TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS type_groups (
-            type_id       INTEGER PRIMARY KEY,
-            group_id      INTEGER NOT NULL,
-            group_name    TEXT,
-            category_id   INTEGER NOT NULL,
-            category_name TEXT,
-            meta_level    INTEGER
-        );
-
         CREATE TABLE IF NOT EXISTS structure_names (
             structure_id    INTEGER PRIMARY KEY,
             name            TEXT,
@@ -208,18 +212,37 @@ def init_db() -> None:
             is_freeport     INTEGER DEFAULT 0,
             fetched_at      TEXT
         );
-
+        CREATE TABLE IF NOT EXISTS freeports (
+            structure_id  INTEGER PRIMARY KEY,
+            name          TEXT,
+            system        TEXT,
+            region        TEXT,
+            sell_orders   INTEGER DEFAULT 0,
+            last_seen     TEXT
+        );
+    """),
+    (1, "universe", """
+        CREATE TABLE IF NOT EXISTS type_names (
+            type_id INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS type_groups (
+            type_id       INTEGER PRIMARY KEY,
+            group_id      INTEGER NOT NULL,
+            group_name    TEXT,
+            category_id   INTEGER NOT NULL,
+            category_name TEXT,
+            meta_level    INTEGER
+        );
         CREATE TABLE IF NOT EXISTS map_regions (
             region_id INTEGER PRIMARY KEY,
             name      TEXT NOT NULL
         );
-
         CREATE TABLE IF NOT EXISTS map_constellations (
             constellation_id INTEGER PRIMARY KEY,
             name             TEXT NOT NULL,
             region_id        INTEGER
         );
-
         CREATE TABLE IF NOT EXISTS map_systems (
             system_id        INTEGER PRIMARY KEY,
             name             TEXT NOT NULL,
@@ -227,9 +250,13 @@ def init_db() -> None:
             region_id        INTEGER,
             security         REAL
         );
-
         CREATE INDEX IF NOT EXISTS idx_map_systems_name ON map_systems(name);
-
+        CREATE TABLE IF NOT EXISTS sde_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+    """),
+    (1, "user", """
         CREATE TABLE IF NOT EXISTS characters (
             character_id   INTEGER PRIMARY KEY,
             character_name TEXT    NOT NULL,
@@ -238,23 +265,77 @@ def init_db() -> None:
             expires_at     REAL,
             is_primary     INTEGER DEFAULT 0
         );
-
         CREATE TABLE IF NOT EXISTS kv (
             namespace TEXT NOT NULL,
             key       TEXT NOT NULL,
             value     TEXT,
             PRIMARY KEY (namespace, key)
         );
-    """)
-    conn.commit()
-    conn.close()
+    """),
+    # ── Add new migrations below this line ────────────────────────────────
+    # Example:
+    # (2, "market", "ALTER TABLE freeports ADD COLUMN corporation_id INTEGER;"),
+]
+
+
+def _get_conn(db: str):
+    return {"market": get_db, "universe": get_universe, "user": get_user}[db]()
+
+
+def init_db() -> None:
+    """Apply all pending migrations to all three databases."""
+    _ensure_schema_version_tables()
+    _apply_migrations()
+
+
+def _ensure_schema_version_tables() -> None:
+    """Create the schema_version table in each DB if it doesn't exist."""
+    for getter in (get_db, get_universe, get_user):
+        conn = getter()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+
+def _apply_migrations() -> None:
+    """Apply any migrations not yet recorded in schema_version."""
+    # Group by db so we open each connection only once per run
+    from itertools import groupby
+    by_db = {}
+    for version, db, sql in MIGRATIONS:
+        by_db.setdefault(db, []).append((version, sql))
+
+    for db, steps in by_db.items():
+        conn = _get_conn(db)
+        applied = {
+            r[0] for r in
+            conn.execute("SELECT version FROM schema_version").fetchall()
+        }
+        pending = [(v, s) for v, s in steps if v not in applied]
+        if not pending:
+            conn.close()
+            continue
+        for version, sql in sorted(pending):
+            try:
+                conn.executescript(sql)
+                conn.execute("INSERT OR IGNORE INTO schema_version VALUES (?)", (version,))
+                conn.commit()
+                log.info("[DB] Applied migration v%d to %s db.", version, db)
+            except Exception as exc:
+                log.error("[DB] Migration v%d failed on %s db: %s", version, db, exc)
+                raise
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Key-value store
 # ---------------------------------------------------------------------------
 
 def kv_get(namespace: str, key: str):
-    conn = get_db()
+    conn = get_user()
     row  = conn.execute(
         "SELECT value FROM kv WHERE namespace=? AND key=?", (namespace, key)
     ).fetchone()
@@ -268,7 +349,7 @@ def kv_get(namespace: str, key: str):
 
 
 def kv_set(namespace: str, key: str, value) -> None:
-    conn = get_db()
+    conn = get_user()
     conn.execute(
         "INSERT OR REPLACE INTO kv (namespace, key, value) VALUES (?,?,?)",
         (namespace, key, json.dumps(value))
@@ -327,22 +408,34 @@ def esi_get_authed_all_pages(path: str, token: str, params: Optional[dict] = Non
 # ---------------------------------------------------------------------------
 
 def resolve_type_names(type_ids: list) -> None:
-    conn    = get_db()
-    c       = conn.cursor()
-    missing = [
-        tid for tid in type_ids
-        if not c.execute("SELECT 1 FROM type_names WHERE type_id=?", (tid,)).fetchone()
-    ]
-    log.info("Type names: %d total, %d cached, %d to fetch",
-             len(type_ids), len(type_ids) - len(missing), len(missing))
+    """Ensure all type_ids have names in the universe cache.
+    The SDE build populates type_names for all known types; this is a
+    safety net for newly released items not yet in the local SDE build.
+    """
+    if not type_ids:
+        return
+    conn = get_universe()
+    placeholders = ",".join("?" * len(type_ids))
+    cached = {
+        r["type_id"]
+        for r in conn.execute(
+            f"SELECT type_id FROM type_names WHERE type_id IN ({placeholders})",
+            tuple(type_ids)
+        ).fetchall()
+    }
+    missing = [tid for tid in type_ids if tid not in cached]
+    if missing:
+        log.info("Type names: %d to fetch from ESI (%d already cached).",
+                 len(missing), len(cached))
     for i in range(0, len(missing), 1000):
         batch = missing[i:i + 1000]
         try:
             r = requests.post(f"{ESI_BASE}/universe/names/", json=batch, timeout=20)
             if r.status_code == 200:
-                for item in r.json():
-                    c.execute("INSERT OR IGNORE INTO type_names VALUES (?,?)",
-                              (item["id"], item["name"]))
+                conn.executemany(
+                    "INSERT OR IGNORE INTO type_names VALUES (?,?)",
+                    [(item["id"], item["name"]) for item in r.json()]
+                )
             else:
                 log.warning("/universe/names/ returned HTTP %s", r.status_code)
         except Exception as exc:
@@ -354,16 +447,8 @@ def resolve_type_names(type_ids: list) -> None:
 # Apparel / SKIN filters
 # ---------------------------------------------------------------------------
 
-# SKIN name patterns — covers standard, plural, multi-ship, and special editions
-_SKIN_SUFFIXES = (" SKIN", " SKINs", " Skin", "License")
-_SKIN_SUBSTRINGS = ("SKIN License", "Day SKIN", "SKIN Collection")
-
-def _is_skin_name(name: str) -> bool:
-    if any(name.endswith(s) for s in _SKIN_SUFFIXES):
-        return True
-    if any(s in name for s in _SKIN_SUBSTRINGS):
-        return True
-    return False
+# Exclude items whose group name is in this set (applied when "Exclude apparel & SKINs" is on)
+_EXCLUDED_GROUPS = {"30-Day SKIN", "Permanent SKIN"}
 
 
 _apparel_ids: set         = set()
@@ -374,7 +459,7 @@ def get_apparel_ids() -> set:
     global _apparel_ids, _apparel_ids_loaded
     if _apparel_ids_loaded:
         return _apparel_ids
-    conn = get_db()
+    conn = get_universe()
     rows = conn.execute(
         "SELECT type_id FROM type_groups WHERE category_id=?",
         (APPAREL_CATEGORY_ID,)
@@ -387,20 +472,23 @@ def get_apparel_ids() -> set:
 
 
 def filter_unwanted(type_ids: set, lookup: dict) -> int:
-    """Remove Apparel and SKIN items in-place. Returns removed count."""
+    """Remove Apparel and SKIN-group items in-place. Returns removed count."""
+    if not type_ids:
+        return 0
     apparel   = get_apparel_ids()
-    conn      = get_db()
-    to_remove = set()
-    for tid in type_ids:
-        if tid in apparel:
-            to_remove.add(tid)
-        else:
-            row = conn.execute(
-                "SELECT name FROM type_names WHERE type_id=?", (tid,)
-            ).fetchone()
-            if row and _is_skin_name(row["name"]):
-                to_remove.add(tid)
-    conn.close()
+    to_remove = set(type_ids & apparel)
+    remaining = type_ids - to_remove
+    if remaining:
+        conn = get_universe()
+        placeholders = ",".join("?" * len(remaining))
+        rows = conn.execute(
+            f"SELECT type_id, group_name FROM type_groups WHERE type_id IN ({placeholders})",
+            tuple(remaining)
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            if row["group_name"] in _EXCLUDED_GROUPS:
+                to_remove.add(row["type_id"])
     type_ids -= to_remove
     for tid in to_remove:
         lookup.pop(tid, None)
@@ -629,6 +717,7 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
     """
     snapshot_date = snapshot_date or date.today().isoformat()
     conn  = get_db()
+    conn.execute(f"ATTACH DATABASE ? AS uni", (DB_UNIVERSE,))
     rows  = conn.execute("""
         SELECT
             COALESCE(s.type_id, d.type_id)  AS type_id,
@@ -651,35 +740,12 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
                ON d.type_id      = s.type_id
               AND d.location_id  = :dst_id
               AND d.snapshot_date = :snap_date
-        LEFT JOIN type_names tn
+        LEFT JOIN uni.type_names tn
                ON tn.type_id = COALESCE(s.type_id, d.type_id)
-        LEFT JOIN type_groups tg
+        LEFT JOIN uni.type_groups tg
                ON tg.type_id = COALESCE(s.type_id, d.type_id)
         WHERE s.location_id   = :src_id
           AND s.snapshot_date = :snap_date
-
-        UNION
-
-        SELECT
-            d.type_id,
-            tn.name,
-            tg.group_name,
-            tg.category_name,
-            tg.meta_level,
-            s.sell_units, s.buy_units, s.split_price,
-            s.lowest_sell_10pct, s.highest_buy_10pct,
-            d.sell_units, d.buy_units, d.split_price,
-            d.lowest_sell_10pct, d.highest_buy_10pct
-        FROM market_snapshots d
-        LEFT JOIN market_snapshots s
-               ON s.type_id      = d.type_id
-              AND s.location_id  = :src_id
-              AND s.snapshot_date = :snap_date
-        LEFT JOIN type_names tn ON tn.type_id = d.type_id
-        LEFT JOIN type_groups tg ON tg.type_id = d.type_id
-        WHERE d.location_id   = :dst_id
-          AND d.snapshot_date = :snap_date
-          AND s.type_id IS NULL
     """, {"src_id": src_id, "dst_id": dst_id, "snap_date": snapshot_date}).fetchall()
 
     result = []
@@ -716,6 +782,7 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
             # Export: buy at destination, sell at source  →  src_sell / dst_buy
             "export_margin": round(src_sell / dst_buy * 100, 2) if (src_sell and dst_buy) else None,
         })
+    conn.execute("DETACH DATABASE uni")
     conn.close()
     return result
 
@@ -723,24 +790,245 @@ def get_comparison(src_id: int, dst_id: int, snapshot_date: Optional[str] = None
 # SDE universe cache
 # ---------------------------------------------------------------------------
 
-def _ensure_universe_cache() -> None:
-    conn  = get_db()
-    count = conn.execute("SELECT COUNT(*) as c FROM map_systems").fetchone()["c"]
+def _scrape_freeports() -> None:
+    """
+    Scrape adam4eve.eu/market_hubs.php for the top player-owned market structures.
+    Only runs if the freeports table is empty or last scrape was >23h ago.
+    Stores results in the freeports table.
+    """
+    import re as _re
+
+    conn = get_db()
+    last = kv_get("freeports", "last_scrape")
+    count = conn.execute("SELECT COUNT(*) as c FROM freeports").fetchone()["c"]
     conn.close()
-    if count:
+
+    if last and count:
+        try:
+            age = time.time() - datetime.fromisoformat(last).timestamp()
+            if age < 82800:  # 23 hours
+                log.debug("[Freeports] Scrape skipped — last run %.0fh ago.", age / 3600)
+                return
+        except Exception:
+            pass
+
+    log.info("[Freeports] Scraping A4E market hubs...")
+    try:
+        r = requests.get(A4E_MARKET_HUBS_URL, timeout=20,
+                         headers={"User-Agent": "EVE-Caravanserai/1.0"})
+        r.raise_for_status()
+    except Exception as exc:
+        log.warning("[Freeports] Scrape failed: %s", exc)
         return
+
+    # Extract rows: structure_history.php?id=XXXXXXX ... Type=Fortizar|Astrahus|etc
+    # Each row has: system, sec, name (with link containing id), type
+    html = r.text
+
+    # Match all structure IDs from links — player structures have large IDs (>1e12)
+    # Pattern: stationID=XXXXXXX in market_orders.php links
+    found = []
+    # Parse table rows — find structure_history links with large IDs (player structures)
+    id_pattern    = _re.compile(r'structure_history\.php\?id=(\d+)')
+    name_pattern  = _re.compile(r'structure_history\.php\?id=\d+"[^>]*>([^<]+)<')
+    system_pattern = _re.compile(r'location\.php\?id=\d+"[^>]*>([^<]+)</a>\s*</td>\s*<td[^>]*>\s*[\d,]+\s*</td>\s*<td[^>]*>\s*<a[^>]+structure_history')
+
+    # Walk through the HTML finding player structure rows
+    # Simpler: find all (id, name) pairs then filter by ID size
+    rows = _re.findall(
+        r'structure_history\.php\?id=(\d+)"[^>]*title="Show structure history">([^<]+)</a>',
+        html
+    )
+
+    # Also capture the system from the preceding <td> cells in the row
+    # Full row pattern: grab region, system, sec, name+id, type, sell_orders
+    row_pattern = _re.compile(
+        r'location\.php\?id=\d+"[^>]*>([^<]+)</a>\s*</td>\s*'   # region
+        r'<td[^>]*>\s*<a[^>]*>([^<]+)</a>\s*</td>\s*'           # system
+        r'<td[^>]*>([\d,]+)\s*</td>\s*'                          # sec
+        r'<td[^>]*>\s*<a[^>]*structure_history[^>]*id=(\d+)[^>]*>([^<]+)</a>\s*</td>\s*'  # id+name
+        r'<td[^>]*>([^<]+)</td>\s*'                              # type
+        r'<td[^>]*>.*?</td>\s*'                                  # buy orders
+        r'<td[^>]*>.*?</td>\s*'                                  # buy volume
+        r'<td[^>]*>\s*<a[^>]*>([\d.,]+)</a>',                   # sell orders
+        _re.DOTALL
+    )
+    matches = row_pattern.findall(html)
+    log.info("[Freeports] A4E regex found %d rows.", len(matches))
+
+    # Fall back to simpler ID+name extraction if regex misses rows
+    if len(matches) < 3:
+        log.info("[Freeports] Falling back to simple ID extraction.")
+        matches_simple = _re.findall(
+            r'structure_history\.php\?id=(\d+)"[^>]*>([^<]+)</a>',
+            html
+        )
+        conn = get_db()
+        now  = datetime.now(timezone.utc).isoformat()
+        inserted = 0
+        for sid_str, name in matches_simple:
+            sid = int(sid_str)
+            if sid in NPC_STATION_IDS or sid < 1_000_000_000_000:
+                continue
+            conn.execute(
+                """INSERT INTO freeports (structure_id, name, system, region, sell_orders, last_seen)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(structure_id) DO UPDATE SET
+                       name=excluded.name, last_seen=excluded.last_seen""",
+                (sid, name.strip(), "", "", 0, now)
+            )
+            inserted += 1
+        conn.commit(); conn.close()
+        kv_set("freeports", "last_scrape", now)
+        log.info("[Freeports] Stored %d structures (simple mode).", inserted)
+        return
+
+    conn = get_db()
+    now  = datetime.now(timezone.utc).isoformat()
+    inserted = 0
+    for region, system, sec, sid_str, name, struct_type, sell_str in matches:
+        sid = int(sid_str)
+        if sid in NPC_STATION_IDS or sid < 1_000_000_000_000:
+            continue
+        sell_orders = int(sell_str.replace(".", "").replace(",", "")) if sell_str.strip() else 0
+        conn.execute(
+            """INSERT INTO freeports (structure_id, name, system, region, sell_orders, last_seen)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(structure_id) DO UPDATE SET
+                   name=excluded.name, system=excluded.system,
+                   region=excluded.region, sell_orders=excluded.sell_orders,
+                   last_seen=excluded.last_seen""",
+            (sid, name.strip(), system.strip(), region.strip(), sell_orders, now)
+        )
+        inserted += 1
+
+    conn.commit(); conn.close()
+    kv_set("freeports", "last_scrape", now)
+    log.info("[Freeports] Stored/updated %d player market structures.", inserted)
+
+
+def _ensure_universe_cache() -> None:
+    """Build or rebuild the universe cache from the CCP SDE zip.
+
+    Version check strategy:
+      1. Fetch schema-changelog.yaml (small, always public).
+         It lists every build that changed schemas, with which files/fields.
+      2. Get the latest buildNumber from _sde.jsonl (tiny).
+      3. If our stored build == latest → skip entirely.
+      4. If builds exist between stored and latest, check whether any of them
+         touched the files we actually use. If none did → update stored build
+         number without re-downloading the zip.
+      5. Only download the full ~70MB zip when a relevant file changed or the
+         cache is empty.
+
+    Files we care about:
+      mapRegions, mapConstellations, mapSolarSystems,
+      categories, groups, typeDogma, types
+    """
+    RELEVANT_FILES = {
+        "mapRegions", "mapConstellations", "mapSolarSystems",
+        "categories", "groups", "typeDogma", "types",
+    }
+
+    conn  = get_universe()
+    count = conn.execute("SELECT COUNT(*) as c FROM map_systems").fetchone()["c"]
+    stored_build = None
+    try:
+        row = conn.execute("SELECT value FROM sde_meta WHERE key='build'").fetchone()
+        stored_build = int(row["value"]) if row else None
+    except Exception:
+        pass
+    conn.close()
+
+    # Fetch schema-changelog.yaml once. It is the only publicly accessible
+    # version source (individual JSONL files return 403; only the zip and
+    # this changelog are available without authentication).
+    #
+    # The first afterBuildNumber is the latest build. We also parse every
+    # entry to build a map of (build → changed files) for the skip logic.
+    import re as _re
+
+    latest_build    = None
+    changelog_builds = []   # [(afterBuildNumber, {file_names}), ...]
+    try:
+        r = requests.get(
+            "https://developers.eveonline.com/static-data/tranquility/schema-changelog.yaml",
+            timeout=15
+        )
+        if r.status_code == 200:
+            current_num   = None
+            current_files = set()
+            for line in r.text.splitlines():
+                # New entry — "- afterBuildNumber: 3241024"
+                m = _re.match(r"^- afterBuildNumber:\s*(\d+)", line)
+                if m:
+                    if current_num is not None:
+                        changelog_builds.append((current_num, current_files))
+                    current_num   = int(m.group(1))
+                    current_files = set()
+                    if latest_build is None:
+                        latest_build = current_num   # first entry = latest
+                    continue
+                # File/field name line — "      mapSolarSystems: added."
+                m = _re.match(r"^\s{4,}([a-zA-Z][a-zA-Z0-9_]+):\s", line)
+                if m and current_num is not None:
+                    current_files.add(m.group(1))
+            if current_num is not None:
+                changelog_builds.append((current_num, current_files))
+        else:
+            log.debug("[SDE] schema-changelog.yaml returned HTTP %s", r.status_code)
+    except Exception as exc:
+        log.debug("[SDE] Could not fetch schema-changelog.yaml: %s", exc)
+
+    if not latest_build:
+        if count:
+            log.debug("[SDE] Could not check SDE version — keeping existing cache.")
+            return
+        # No cache and no version info — attempt build anyway
+    elif count and stored_build and stored_build == latest_build:
+        log.debug("[SDE] Universe cache is current (build %s).", latest_build)
+        return
+
+    # ── Decide whether to rebuild based on which files changed ───────────────
+    relevant_changed = False
+
+    if count and stored_build and latest_build:
+        newer = [(b, f) for b, f in changelog_builds if b > stored_build]
+        if not newer:
+            # Build number advanced but no schema changelog entry — data-only
+            # patch (e.g. new items). Rebuild to pick up the new type names.
+            relevant_changed = True
+        else:
+            for _b, files in newer:
+                if files & RELEVANT_FILES:
+                    relevant_changed = True
+                    break
+            if not relevant_changed:
+                # All changes are in files we don't use. Advance stored build
+                # and skip the 70 MB download.
+                c = get_universe()
+                c.execute("INSERT OR REPLACE INTO sde_meta VALUES ('build', ?)",
+                          (str(latest_build),))
+                c.commit(); c.close()
+                log.info("[SDE] Build %s → %s: no relevant changes — skipping zip.",
+                         stored_build, latest_build)
+                return
+    else:
+        relevant_changed = True  # cache empty or no stored build
+
+    if stored_build and stored_build != latest_build:
+        log.info("[SDE] SDE updated (%s → %s). Rebuilding.", stored_build, latest_build)
+    elif not count:
+        log.info("[SDE] Universe cache empty — building (build %s).", latest_build)
 
     global _apparel_ids_loaded
     _apparel_ids_loaded = False
-    log.info("[SDE] Building universe cache from Fuzzwork SDE CSVs...")
+    log.info("[SDE] Downloading CCP SDE zip (build %s)...", latest_build)
 
-    def fetch_bz2(table: str) -> list:
-        r = requests.get(f"{SDE_BASE}/{table}.csv.bz2", timeout=60)
-        r.raise_for_status()
-        return list(csv.DictReader(io.StringIO(bz2.decompress(r.content).decode("utf-8"))))
+    CCP_ZIP_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
 
     def bulk_insert(table, rows, cols):
-        conn = get_db()
+        conn = get_universe()
         conn.executemany(
             f"INSERT OR IGNORE INTO {table} VALUES ({','.join(['?']*cols)})", rows
         )
@@ -748,69 +1036,139 @@ def _ensure_universe_cache() -> None:
         conn.close()
 
     try:
-        rows = [(int(r["regionID"]), r["regionName"])
-                for r in fetch_bz2("mapRegions") if r.get("regionID")]
+        # Download the full SDE zip once, extract needed files in memory
+        r = requests.get(CCP_ZIP_URL, timeout=300)
+        r.raise_for_status()
+        log.info("[SDE] Downloaded %d MB. Extracting...", len(r.content) // 1_000_000)
+
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+
+        def read_jsonl(filename: str) -> list:
+            """Read a JSONL file from the in-memory zip."""
+            try:
+                data = zf.read(filename).decode("utf-8")
+            except KeyError:
+                # Some zips have a subfolder prefix
+                matches = [n for n in zf.namelist() if n.endswith("/" + filename) or n == filename]
+                if not matches:
+                    raise FileNotFoundError(f"{filename} not found in zip")
+                data = zf.read(matches[0]).decode("utf-8")
+            return [json.loads(line) for line in data.splitlines() if line.strip()]
+
+        # ── Map data: all from CCP SDE ────────────────────────────────────────
+
+        # mapRegions.jsonl: _key=regionID, name.en
+        rows = []
+        for obj in read_jsonl("mapRegions.jsonl"):
+            try:
+                rows.append((obj["_key"], obj["name"]["en"]))
+            except (KeyError, TypeError):
+                pass
         bulk_insert("map_regions", rows, 2)
         log.info("[SDE] %d regions.", len(rows))
 
-        rows = [(int(r["constellationID"]), r["constellationName"], int(r["regionID"]))
-                for r in fetch_bz2("mapConstellations") if r.get("constellationID")]
+        # mapConstellations.jsonl: _key=constellationID, name.en, regionID
+        rows = []
+        for obj in read_jsonl("mapConstellations.jsonl"):
+            try:
+                rows.append((obj["_key"], obj["name"]["en"], obj["regionID"]))
+            except (KeyError, TypeError):
+                pass
         bulk_insert("map_constellations", rows, 3)
         log.info("[SDE] %d constellations.", len(rows))
 
+        # mapSolarSystems.jsonl: _key=solarSystemID, name.en, constellationID,
+        #                        regionID, securityStatus
         rows = []
-        for r in fetch_bz2("mapSolarSystems"):
+        for obj in read_jsonl("mapSolarSystems.jsonl"):
             try:
-                rows.append((int(r["solarSystemID"]), r["solarSystemName"],
-                             int(r["constellationID"]), int(r["regionID"]),
-                             float(r.get("security") or 0)))
-            except (KeyError, ValueError):
+                rows.append((
+                    obj["_key"],
+                    obj["name"]["en"],
+                    obj["constellationID"],
+                    obj["regionID"],
+                    float(obj.get("securityStatus") or 0),
+                ))
+            except (KeyError, TypeError):
                 pass
         bulk_insert("map_systems", rows, 5)
         log.info("[SDE] %d solar systems.", len(rows))
 
-        # invCategories: categoryID → name
+        # ── Type data ─────────────────────────────────────────────────────────
+
+        # categories.jsonl: _key=categoryID, name.en
         cat_names = {}
-        for r in fetch_bz2("invCategories"):
+        for obj in read_jsonl("categories.jsonl"):
             try:
-                cat_names[int(r["categoryID"])] = r.get("categoryName", "")
-            except (KeyError, ValueError):
+                cat_names[obj["_key"]] = obj["name"]["en"]
+            except (KeyError, TypeError):
                 pass
         log.info("[SDE] %d categories.", len(cat_names))
 
-        # invGroups: groupID → {categoryID, groupName}
+        # groups.jsonl: _key=groupID, name.en, categoryID
         group_info = {}
-        for r in fetch_bz2("invGroups"):
+        for obj in read_jsonl("groups.jsonl"):
             try:
-                gid = int(r["groupID"])
-                cid = int(r["categoryID"])
-                group_info[gid] = {"category_id": cid, "group_name": r.get("groupName", "")}
-            except (KeyError, ValueError):
+                group_info[obj["_key"]] = {
+                    "category_id": obj["categoryID"],
+                    "group_name":  obj["name"]["en"],
+                }
+            except (KeyError, TypeError):
                 pass
-        log.info("[SDE] %d inventory groups.", len(group_info))
+        log.info("[SDE] %d groups.", len(group_info))
 
-        # invTypes: typeID → group + category
-        rows = []
-        for r in fetch_bz2("invTypes"):
+        # typeDogma.jsonl: _key=typeID, dogmaAttributes=[{attributeID, value}]
+        # attributeID 633 = metaLevel (0=T1, 1-4=Meta, 5=T2/T3, 6=Storyline,
+        #                              7-9=Faction, 10-14=Deadspace, 15=Officer)
+        META_LEVEL_ATTR = 633
+        meta_levels = {}
+        for obj in read_jsonl("typeDogma.jsonl"):
             try:
-                tid = int(r["typeID"])
-                gid = int(r["groupID"])
-                gi  = group_info.get(gid)
-                if gi is not None:
-                    # metaGroupID: 1=T1, 2=T2, 3=Storyline, 4=Faction, 5=Officer,
-                    #              6=Deadspace, 14=T3  — store raw for frontend filtering
-                    meta = int(r["metaGroupID"]) if r.get("metaGroupID") else 0
-                    rows.append((
-                        tid, gid,
-                        gi["group_name"],
-                        gi["category_id"],
-                        cat_names.get(gi["category_id"], ""),
-                        meta,
-                    ))
-            except (KeyError, ValueError):
+                for attr in obj.get("dogmaAttributes", []):
+                    if attr["attributeID"] == META_LEVEL_ATTR:
+                        meta_levels[obj["_key"]] = int(attr["value"])
+                        break
+            except (KeyError, TypeError, ValueError):
                 pass
-        bulk_insert("type_groups", rows, 6)
-        log.info("[SDE] %d type→group→category mappings. Universe cache ready.", len(rows))
+        log.info("[SDE] %d meta level values.", len(meta_levels))
+
+        # types.jsonl: _key=typeID, name.en, groupID
+        # Build type_names and type_groups in one pass
+        type_name_rows = []
+        type_group_rows = []
+        for obj in read_jsonl("types.jsonl"):
+            try:
+                tid  = obj["_key"]
+                gid  = obj["groupID"]
+                name = obj["name"]["en"]
+                gi   = group_info.get(gid)
+                if name:
+                    type_name_rows.append((tid, name))
+                if gi is None:
+                    continue
+                type_group_rows.append((
+                    tid, gid,
+                    gi["group_name"],
+                    gi["category_id"],
+                    cat_names.get(gi["category_id"], ""),
+                    meta_levels.get(tid, 0),
+                ))
+            except (KeyError, TypeError):
+                pass
+
+        conn = get_universe()
+        conn.executemany("INSERT OR IGNORE INTO type_names VALUES (?,?)", type_name_rows)
+        conn.commit(); conn.close()
+        bulk_insert("type_groups", type_group_rows, 6)
+        log.info("[SDE] %d type names, %d type→group→category mappings. Universe cache ready.",
+                 len(type_name_rows), len(type_group_rows))
+
+        # Record the build number we just downloaded
+        if latest_build:
+            conn = get_universe()
+            conn.execute("INSERT OR REPLACE INTO sde_meta VALUES ('build', ?)", (latest_build,))
+            conn.commit(); conn.close()
+            log.info("[SDE] Recorded build %s.", latest_build)
 
     except Exception as exc:
         log.error("[SDE] Cache build failed: %s", exc, exc_info=True)
@@ -820,7 +1178,7 @@ def search_systems(query: str) -> list:
     q = query.strip()
     if not q:
         return []
-    conn = get_db()
+    conn = get_universe()
     rows = conn.execute("""
         SELECT s.system_id, s.name, s.security,
                r.name AS region_name,
@@ -847,7 +1205,7 @@ def search_systems(query: str) -> list:
 
 def get_all_characters() -> list:
     """Return all authenticated characters from DB."""
-    conn = get_db()
+    conn = get_user()
     rows = conn.execute(
         "SELECT character_id, character_name, is_primary FROM characters ORDER BY is_primary DESC, character_name"
     ).fetchall()
@@ -857,7 +1215,7 @@ def get_all_characters() -> list:
 
 def get_character_token(character_id: Optional[int] = None) -> Optional[str]:
     """Return a valid access token for the given character (or primary if None)."""
-    conn = get_db()
+    conn = get_user()
     if character_id:
         row = conn.execute(
             "SELECT * FROM characters WHERE character_id=?", (character_id,)
@@ -900,7 +1258,7 @@ def _refresh_character_token(tokens: dict) -> Optional[str]:
         if r.status_code == 200:
             new_tok = r.json()
             expires_at = time.time() + new_tok.get("expires_in", 1199)
-            conn = get_db()
+            conn = get_user()
             conn.execute(
                 "UPDATE characters SET access_token=?, refresh_token=?, expires_at=? WHERE character_id=?",
                 (new_tok["access_token"], new_tok.get("refresh_token", tokens["refresh_token"]),
@@ -912,12 +1270,6 @@ def _refresh_character_token(tokens: dict) -> Optional[str]:
     except Exception as exc:
         log.warning("[SSO] Refresh error: %s", exc)
     return None
-
-
-def _sso_refresh(tokens: dict) -> Optional[str]:
-    client_id = kv_get("config", "esi_client_id")
-    if not client_id:
-        return None
     try:
         r = requests.post(SSO_TOKEN_URL, data={
             "grant_type":    "refresh_token",
@@ -955,15 +1307,19 @@ def _complete_auth(code: str) -> None:
             return
         tokens               = r.json()
         tokens["expires_at"] = time.time() + tokens.get("expires_in", 1199)
-        verify = requests.get(
+        vr = requests.get(
             SSO_VERIFY,
             headers={"Authorization": f"Bearer {tokens['access_token']}"},
             timeout=15,
-        ).json()
+        )
+        if vr.status_code != 200:
+            log.error("[SSO] Verify failed: HTTP %s", vr.status_code)
+            return
+        verify = vr.json()
         char_id   = verify.get("CharacterID")
         char_name = verify.get("CharacterName")
         # Store in characters table
-        conn = get_db()
+        conn = get_user()
         existing = conn.execute("SELECT COUNT(*) as c FROM characters").fetchone()["c"]
         conn.execute("""
             INSERT INTO characters (character_id, character_name, access_token, refresh_token, expires_at, is_primary)
@@ -1073,7 +1429,7 @@ def auth_logout():
     data    = request.get_json(force=True) or {}
     char_id = data.get("character_id")
     if char_id:
-        conn = get_db()
+        conn = get_user()
         conn.execute("DELETE FROM characters WHERE character_id=?", (char_id,))
         # If this was primary, promote next character
         conn.execute("""
@@ -1085,7 +1441,7 @@ def auth_logout():
         log.info("[SSO] Removed character %s.", char_id)
     else:
         # Logout all
-        conn = get_db()
+        conn = get_user()
         conn.execute("DELETE FROM characters")
         conn.commit(); conn.close()
         for key in ("tokens", "character_id", "character_name"):
@@ -1100,7 +1456,7 @@ def auth_set_primary():
     char_id = data.get("character_id")
     if not char_id:
         return jsonify({"ok": False}), 400
-    conn = get_db()
+    conn = get_user()
     conn.execute("UPDATE characters SET is_primary=0")
     conn.execute("UPDATE characters SET is_primary=1 WHERE character_id=?", (char_id,))
     conn.commit(); conn.close()
@@ -1150,33 +1506,50 @@ def api_npc_hubs():
 @app.route("/api/freeports")
 def api_freeports():
     """
-    Return known pre-cached freeports plus any the player can see.
-    Pre-cached entries are always listed; auth-visible ones require a token.
+    Return player market structures discovered via A4E scrape, sorted by sell orders.
+    Falls back to empty list if scrape hasn't run yet.
     """
-    results = []
-
-    # Always include known freeports from our pre-defined list
     conn = get_db()
-    for system, sid in KNOWN_FREEPORTS.items():
-        row = conn.execute(
-            "SELECT name FROM structure_names WHERE structure_id=?", (sid,)
-        ).fetchone()
-        name = row["name"] if row else f"{system} Freeport"
-        results.append({"id": sid, "name": name, "system": system, "known": True})
+    rows = conn.execute(
+        "SELECT structure_id, name, system, region, sell_orders FROM freeports "
+        "ORDER BY sell_orders DESC LIMIT 50"
+    ).fetchall()
     conn.close()
+    return jsonify([{
+        "id":          r["structure_id"],
+        "name":        r["name"],
+        "system":      r["system"],
+        "region":      r["region"],
+        "sell_orders": r["sell_orders"],
+    } for r in rows])
 
-    return jsonify(results)
+
+@app.route("/api/freeports/refresh", methods=["POST"])
+def api_freeports_refresh():
+    """Force a fresh scrape of A4E market hubs."""
+    kv_set("freeports", "last_scrape", None)
+    threading.Thread(target=_scrape_freeports, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/systems/<int:system_id>/structures")
 def api_structures_in_system(system_id):
     """Return market-capable structures visible to the authed character."""
-    token   = sso_get_token()
-    char_id = kv_get("auth", "character_id")
-    if not token or not char_id:
+    token = sso_get_token()
+    if not token:
+        return jsonify({"error": "not_authenticated"}), 401
+    conn_u  = get_user()
+    row_u   = conn_u.execute(
+        "SELECT character_id FROM characters WHERE is_primary=1 LIMIT 1"
+    ).fetchone()
+    if not row_u:
+        row_u = conn_u.execute("SELECT character_id FROM characters LIMIT 1").fetchone()
+    conn_u.close()
+    char_id = row_u["character_id"] if row_u else None
+    if not char_id:
         return jsonify({"error": "not_authenticated"}), 401
 
-    conn    = get_db()
+    conn    = get_universe()
     sys_row = conn.execute(
         "SELECT name FROM map_systems WHERE system_id=?", (system_id,)
     ).fetchone()
@@ -1349,7 +1722,7 @@ def api_compare_csv(src_id, dst_id):
 @app.route("/api/filter_options")
 def api_filter_options():
     """Return sorted lists of unique category and group names for filter dropdowns."""
-    conn  = get_db()
+    conn  = get_universe()
     cats  = conn.execute(
         "SELECT DISTINCT category_name FROM type_groups "
         "WHERE category_name != '' ORDER BY category_name"
@@ -1367,7 +1740,7 @@ def api_filter_options():
 
 @app.route("/api/sde/status")
 def api_sde_status():
-    conn = get_db()
+    conn = get_universe()
     sys_count = conn.execute("SELECT COUNT(*) as c FROM map_systems").fetchone()["c"]
     reg_count = conn.execute("SELECT COUNT(*) as c FROM map_regions").fetchone()["c"]
     conn.close()
@@ -1387,7 +1760,19 @@ def api_search_systems():
 
 @app.route("/api/orders/character")
 def api_character_orders():
-    """Return open orders for all authenticated characters, summed per type."""
+    """Return open orders for all authenticated characters, summed per type.
+
+    Optional query params:
+      src  — location_id of the source market
+      dst  — location_id of the destination market
+
+    When provided, only orders at src or dst are included. Orders at
+    unrelated locations (e.g. a different trade hub) are excluded.
+    """
+    src_id = request.args.get("src", type=int)
+    dst_id = request.args.get("dst", type=int)
+    locations = {l for l in (src_id, dst_id) if l is not None}
+
     result = {}
     for char in get_all_characters():
         token = get_character_token(char["character_id"])
@@ -1399,6 +1784,8 @@ def api_character_orders():
         for o in (orders or []):
             if o.get("state", "open") != "open":
                 continue
+            if locations and o.get("location_id") not in locations:
+                continue
             tid = str(o["type_id"])
             if tid not in result:
                 result[tid] = {"char_buy": 0, "char_sell": 0}
@@ -1409,10 +1796,20 @@ def api_character_orders():
 
 @app.route("/api/orders/corporation")
 def api_corporation_orders():
-    """Return open orders for the primary character's corporation, summed per type."""
+    """Return open orders for the primary character's corporation, summed per type.
+
+    Optional query params:
+      src  — location_id of the source market
+      dst  — location_id of the destination market
+
+    When provided, only orders at src or dst are included.
+    """
+    src_id = request.args.get("src", type=int)
+    dst_id = request.args.get("dst", type=int)
+    locations = {l for l in (src_id, dst_id) if l is not None}
+
     token = sso_get_token()
-    # Get char_id from characters table (primary), not legacy kv
-    conn  = get_db()
+    conn  = get_user()
     row   = conn.execute(
         "SELECT character_id FROM characters WHERE is_primary=1 LIMIT 1"
     ).fetchone()
@@ -1422,20 +1819,20 @@ def api_corporation_orders():
     if not token or not row:
         return jsonify({}), 401
     char_id = row["character_id"]
-    # Get corp ID
     char_info, _ = esi_get_authed(f"/characters/{char_id}/", token)
     if not char_info:
         return jsonify({})
     corp_id = char_info.get("corporation_id")
     if not corp_id:
         return jsonify({})
-    # Fetch corp orders (all divisions)
     orders = esi_get_authed_all_pages(
         f"/corporations/{corp_id}/orders/", token
     )
     result = {}
     for o in orders:
         if o.get("state", "open") != "open":
+            continue
+        if locations and o.get("location_id") not in locations:
             continue
         tid = str(o["type_id"])
         if tid not in result:
@@ -1450,6 +1847,55 @@ def api_open_market_window(type_id):
     return _esi_ui_post("/ui/openwindow/marketdetails/", {"type_id": type_id})
 
 
+@app.route("/api/ui/waypoint/<int:destination_id>", methods=["POST"])
+def api_set_waypoint(destination_id):
+    """Set autopilot destination for one or all authenticated characters.
+
+    Query param:
+      scope = 'primary' (default) | 'all'
+
+    ESI params (all required by ESI, sent as query string):
+      destination_id          — station or structure ID
+      add_to_beginning=false  — replace destination, not prepend
+      clear_other_waypoints=true
+    """
+    scope = request.args.get("scope", "primary")
+
+    chars = get_all_characters()
+    if not chars:
+        return jsonify({"ok": False, "error": "No authenticated characters."}), 401
+
+    if scope == "primary":
+        primary = next((c for c in chars if c["is_primary"]), chars[0])
+        targets = [primary]
+    else:
+        targets = chars
+
+    results = []
+    for char in targets:
+        token = get_character_token(char["character_id"])
+        if not token:
+            results.append({"char": char["character_name"], "ok": False, "error": "token expired"})
+            continue
+        try:
+            r = requests.post(
+                f"{ESI_BASE}/ui/autopilot/waypoint/",
+                params={
+                    "destination_id":        destination_id,
+                    "add_to_beginning":      "false",
+                    "clear_other_waypoints": "true",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            results.append({"char": char["character_name"], "ok": r.status_code == 204})
+        except Exception as exc:
+            results.append({"char": char["character_name"], "ok": False, "error": str(exc)})
+
+    all_ok = all(r["ok"] for r in results)
+    return jsonify({"ok": all_ok, "results": results})
+
+
 @app.route("/api/ui/corp/<int:corp_id>", methods=["POST"])
 def api_open_corp_info(corp_id):
     return _esi_ui_post("/ui/openwindow/information/", {"target_id": corp_id})
@@ -1460,6 +1906,125 @@ def api_open_wallet_window():
     return _esi_ui_post("/ui/openwindow/wallet/", {})
 
 # ---------------------------------------------------------------------------
+# Auto-updater
+# ---------------------------------------------------------------------------
+
+GITHUB_REPO     = "Amalgamator/EVE-Caravanserai"
+CURRENT_VERSION = "v0.1.0-alpha"   # keep in sync with git tags
+
+
+def _is_git_repo() -> bool:
+    """Return True if app.py is running inside a git working tree."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+@app.route("/api/update/check")
+def api_update_check():
+    """Check GitHub for a newer release tag.
+
+    Tries /releases/latest first. If the repo has no releases (404),
+    falls back to /tags to find the newest semver tag.
+    Returns up_to_date=True and no badge when version cannot be determined.
+    """
+    headers = {"Accept": "application/vnd.github+json"}
+    tag = url = notes = ""
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            data  = r.json()
+            tag   = data.get("tag_name", "")
+            url   = data.get("html_url", "")
+            notes = data.get("body", "")[:500]
+        elif r.status_code == 404:
+            # No releases published yet — try tags
+            r2 = requests.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/tags",
+                headers=headers, timeout=10,
+            )
+            if r2.status_code == 200:
+                tags = r2.json()
+                if tags:
+                    tag = tags[0].get("name", "")
+                    url = f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}"
+        else:
+            log.debug("[Update] GitHub returned HTTP %s: %s", r.status_code, r.text[:200])
+            return jsonify({"up_to_date": True, "current": CURRENT_VERSION,
+                            "error": f"GitHub returned {r.status_code}"})
+    except Exception as exc:
+        log.debug("[Update] Could not reach GitHub: %s", exc)
+        return jsonify({"up_to_date": True, "current": CURRENT_VERSION,
+                        "error": str(exc)})
+
+    if not tag:
+        # No releases or tags found — nothing to report
+        return jsonify({"up_to_date": True, "current": CURRENT_VERSION})
+
+    up_to_date = (tag == CURRENT_VERSION)
+    return jsonify({
+        "current":    CURRENT_VERSION,
+        "latest":     tag,
+        "up_to_date": up_to_date,
+        "url":        url,
+        "notes":      notes,
+        "can_update": _is_git_repo() and not up_to_date,
+    })
+
+
+@app.route("/api/update/apply", methods=["POST"])
+def api_update_apply():
+    """Pull the latest version from git and restart the process.
+
+    Only works when running from a git clone. Returns immediately with
+    {"ok": true} — the process restarts in a background thread so the
+    response can be delivered first. The client should poll /api/update/check
+    until the new version is reported, then reload.
+    """
+    import subprocess
+
+    if not _is_git_repo():
+        return jsonify({"ok": False, "error": "Not running from a git repo. Update manually."}), 400
+
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=app_dir,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            log.error("[Update] git pull failed: %s", result.stderr.strip())
+            return jsonify({
+                "ok":     False,
+                "error":  "git pull failed",
+                "detail": result.stderr.strip(),
+            }), 500
+        log.info("[Update] git pull succeeded: %s", result.stdout.strip())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    # Restart in a thread so this response is delivered first
+    def _restart():
+        time.sleep(0.8)
+        log.info("[Update] Restarting process...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"ok": True, "output": result.stdout.strip()})
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1467,4 +2032,5 @@ if __name__ == "__main__":
     init_db()
     if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         threading.Thread(target=_ensure_universe_cache, daemon=True).start()
+        threading.Thread(target=_scrape_freeports, daemon=True).start()
     app.run(debug=False, port=8182)
