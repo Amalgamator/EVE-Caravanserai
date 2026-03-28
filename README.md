@@ -93,7 +93,6 @@ EVE Caravanserai needs permission to read market data from your EVE character. Y
 3. Fill in the form:
    - **Name:** anything you like, e.g. `Caravanserai`
    - **Description:** anything, e.g. `Personal market tool`
-   - **Connection Type:** select **Authentication & API Access**
    - **Callback URL:** enter exactly: `http://127.0.0.1:8182/callback`
    - **Scopes:** add all of the following by searching for each one and clicking it:
      - `publicData`
