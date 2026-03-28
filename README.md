@@ -102,7 +102,7 @@ EVE Caravanserai needs permission to read market data from your EVE character. Y
      - `esi-ui.open_window.v1`
      - `esi-markets.read_character_orders.v1`
      - `esi-markets.read_corporation_orders.v1`
-4. Click **Create Application**
+4. Hit **SAVE**
 5. On the next page, copy your **Client ID** — a long string of letters and numbers. Keep it handy for Step 5.
 
 ---
