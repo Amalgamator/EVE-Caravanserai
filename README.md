@@ -100,6 +100,7 @@ EVE Caravanserai needs permission to read market data from your EVE character. Y
      - `esi-search.search_structures.v1`
      - `esi-markets.structure_markets.v1`
      - `esi-ui.open_window.v1`
+     - `esi-ui.write_waypoint.v1`
      - `esi-markets.read_character_orders.v1`
      - `esi-markets.read_corporation_orders.v1`
 4. Hit **SAVE**
